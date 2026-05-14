@@ -96,6 +96,14 @@ env_allowlist:
   - PATH
   - HOME
   - LANG
+allowed_read_paths:
+  - /home/user/projects/*
+  - /tmp/*
+allowed_write_paths:
+  - /home/user/projects/*
+forbidden_ports:
+  - 22
+  - 2375
 `
 	p := writeTemp(t, yaml)
 	cfg, err := LoadDaemon(p)
@@ -107,6 +115,15 @@ env_allowlist:
 	}
 	if len(cfg.EnvAllowlist) != 3 {
 		t.Errorf("env_allowlist: %+v", cfg.EnvAllowlist)
+	}
+	if len(cfg.AllowedReadPaths) != 2 || cfg.AllowedReadPaths[1] != "/tmp/*" {
+		t.Errorf("allowed_read_paths: %+v", cfg.AllowedReadPaths)
+	}
+	if len(cfg.AllowedWritePaths) != 1 {
+		t.Errorf("allowed_write_paths: %+v", cfg.AllowedWritePaths)
+	}
+	if len(cfg.ForbiddenPorts) != 2 || cfg.ForbiddenPorts[0] != 22 {
+		t.Errorf("forbidden_ports: %+v", cfg.ForbiddenPorts)
 	}
 }
 

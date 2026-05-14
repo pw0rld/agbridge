@@ -47,6 +47,9 @@ type DaemonConfig struct {
 	CertPin           string   `yaml:"cert_pin"`
 	AllowedExecCwds   []string `yaml:"allowed_exec_cwds"`
 	EnvAllowlist      []string `yaml:"env_allowlist"`
+	AllowedReadPaths  []string `yaml:"allowed_read_paths"`
+	AllowedWritePaths []string `yaml:"allowed_write_paths"`
+	ForbiddenPorts    []int    `yaml:"forbidden_ports"`
 }
 
 // LoadGateway parses a gateway YAML config from path and validates it.
