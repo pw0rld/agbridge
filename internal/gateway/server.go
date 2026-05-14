@@ -1,5 +1,6 @@
-// Package gateway is the rendezvous server. Phase 1 only echoes Ping → Pong.
-// Routing, auth, audit land in Phase 2.
+// Package gateway is the rendezvous server. Phase 2 handles handshake-time
+// auth, maintains a registry of online daemons, and routes Route frames from
+// bridge to the named daemon target.
 package gateway
 
 import (
@@ -9,17 +10,29 @@ import (
 	"log"
 	"net"
 
+	"github.com/pw0rld/agbridge/internal/audit"
+	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
 
-// Run starts a gateway on addr. It returns the listener's actual address
-// (useful when addr ends in ":0"). The server stops when ctx is cancelled.
-func Run(ctx context.Context, addr string, tlsCfg *tls.Config) (net.Addr, error) {
-	ln, err := wss.Listen(ctx, addr, tlsCfg)
+// connIO is the subset of *wss.Conn used by handlers; declared here so
+// tests can substitute stubs.
+type connIO interface {
+	Recv(context.Context) (proto.Frame, error)
+	Send(context.Context, proto.Frame) error
+	Close() error
+}
+
+// Run starts the gateway. It returns the listener's actual address.
+func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (net.Addr, error) {
+	ln, err := wss.Listen(ctx, cfg.Listen, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
+	reg := NewRegistry()
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -33,27 +46,135 @@ func Run(ctx context.Context, addr string, tlsCfg *tls.Config) (net.Addr, error)
 				}
 				return
 			}
-			go handleConn(ctx, c)
+			go handleConn(ctx, c, cfg, reg, aud)
 		}
 	}()
 	return ln.Addr(), nil
 }
 
-type connIO interface {
-	Recv(context.Context) (proto.Frame, error)
-	Send(context.Context, proto.Frame) error
-	Close() error
+func handleConn(ctx context.Context, c connIO, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
+	defer c.Close()
+	hello, ok := readHello(ctx, c)
+	if !ok {
+		_ = aud.Append(map[string]any{"event": "handshake_malformed"})
+		return
+	}
+	switch hello.Role {
+	case "daemon":
+		handleDaemon(ctx, c, hello, cfg, reg, aud)
+	case "bridge":
+		handleBridge(ctx, c, hello, cfg, reg, aud)
+	default:
+		_ = c.Send(ctx, errFrame("unknown_role"))
+		_ = aud.Append(map[string]any{"event": "auth_failed", "reason": "unknown_role", "name": hello.Name})
+	}
 }
 
-func handleConn(ctx context.Context, c connIO) {
-	defer c.Close()
+func readHello(ctx context.Context, c connIO) (handshake.Hello, bool) {
+	f, err := c.Recv(ctx)
+	if err != nil || f.Type != proto.FrameTypeHello {
+		return handshake.Hello{}, false
+	}
+	h, err := handshake.DecodeHello(f.Payload)
+	if err != nil {
+		return handshake.Hello{}, false
+	}
+	return h, true
+}
+
+func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
+	var entry *config.DaemonEntry
+	for i := range cfg.Daemons {
+		if cfg.Daemons[i].Name == h.Name {
+			entry = &cfg.Daemons[i]
+			break
+		}
+	}
+	if entry == nil || !auth.SecretMatches(h.Secret, entry.TokenHash) {
+		_ = c.Send(ctx, errFrame("auth_failed"))
+		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
+		return
+	}
+	if err := reg.Register(h.Name, c); err != nil {
+		_ = c.Send(ctx, errFrame("duplicate_daemon"))
+		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name, "reason": "duplicate"})
+		return
+	}
+	defer reg.Unregister(h.Name)
+	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
+	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
+	// Phase 2: the daemon connection is read by bridgeRoutingLoop via the
+	// registry. We just block until shutdown.
+	<-ctx.Done()
+}
+
+func handleBridge(ctx context.Context, c connIO, h handshake.Hello, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
+	var entry *config.AgentEntry
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == h.Name {
+			entry = &cfg.Agents[i]
+			break
+		}
+	}
+	if entry == nil || !auth.SecretMatches(h.Secret, entry.APIKeyHash) {
+		_ = c.Send(ctx, errFrame("auth_failed"))
+		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "bridge", "name": h.Name})
+		return
+	}
+	if !contains(entry.AllowedDaemons, h.TargetDaemon) {
+		_ = c.Send(ctx, errFrame("daemon_not_allowed"))
+		_ = aud.Append(map[string]any{"event": "authz_failed", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+		return
+	}
+	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
+	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+
+	apiKey := []byte(h.Secret)
 	for {
 		f, err := c.Recv(ctx)
 		if err != nil {
 			return
 		}
-		if f.Type == proto.FrameTypePing {
-			_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypePong, ReqID: f.ReqID})
+		if f.Type != proto.FrameTypeRoute {
+			continue
+		}
+		inner, err := auth.VerifyFrame(apiKey, f.Payload)
+		if err != nil {
+			_ = c.Send(ctx, errFrame("bad_mac"))
+			_ = aud.Append(map[string]any{"event": "mac_failed", "agent": h.Name, "target": h.TargetDaemon})
+			return
+		}
+		dconn, ok := reg.Lookup(h.TargetDaemon)
+		if !ok {
+			_ = c.Send(ctx, errFrame("daemon_offline"))
+			_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
+			continue
+		}
+		_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon})
+		// forward inner frame bytes into daemon as a Route frame
+		if err := dconn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
+			_ = c.Send(ctx, errFrame("daemon_send_failed"))
+			continue
+		}
+		// wait for response from daemon
+		resp, err := dconn.Recv(ctx)
+		if err != nil {
+			_ = c.Send(ctx, errFrame("daemon_recv_failed"))
+			return
+		}
+		_ = c.Send(ctx, resp)
+	}
+}
+
+func errFrame(code string) proto.Frame {
+	return proto.Frame{Type: proto.FrameTypeError, Payload: []byte(code)}
+}
+
+func contains(xs []string, x string) bool {
+	for _, s := range xs {
+		if s == x {
+			return true
 		}
 	}
+	return false
 }
