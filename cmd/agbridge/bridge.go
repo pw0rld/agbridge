@@ -25,7 +25,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
 
-const maxBufferedOutput = 1 << 20
+const maxBufferedOutput = 10 << 20
 
 func newBridgeCmd() *cobra.Command {
 	var cfgPath string
