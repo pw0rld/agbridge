@@ -36,6 +36,16 @@ const (
 	FrameTypeExecRequest  FrameType = 20
 	FrameTypeExecChunk    FrameType = 21
 	FrameTypeExecComplete FrameType = 22
+
+	FrameTypeFileReadRequest  FrameType = 30
+	FrameTypeFileWriteRequest FrameType = 31
+	FrameTypeFileChunk        FrameType = 32
+	FrameTypeFileComplete     FrameType = 33
+
+	FrameTypeStreamOpen  FrameType = 40
+	FrameTypeStreamAck   FrameType = 41
+	FrameTypeStreamData  FrameType = 42
+	FrameTypeStreamClose FrameType = 43
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific
