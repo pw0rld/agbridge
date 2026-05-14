@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
+	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -80,6 +82,19 @@ func newBridgeCmd() *cobra.Command {
 					"required": []string{"cmd", "cwd"},
 				},
 			}, rt.execHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name:        "read_file",
+				Description: "Read a file on the remote daemon machine. Returns content + sha256 in _meta.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":     map[string]any{"type": "string"},
+						"max_size": map[string]any{"type": "integer"},
+					},
+					"required": []string{"path"},
+				},
+			}, rt.readFileHandler)
 
 			return srv.Serve(ctx, os.Stdin, os.Stdout)
 		},
@@ -251,6 +266,77 @@ func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
 		}
 	}
 	return result
+}
+
+type readFileArgs struct {
+	Path    string `json:"path"`
+	MaxSize int    `json:"max_size"`
+}
+
+func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args readFileArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fileproto.FileReadRequest{Path: args.Path, MaxSize: args.MaxSize}.Encode()
+	inner, _ := proto.Frame{Type: proto.FrameTypeFileReadRequest, ReqID: reqID, Payload: reqJSON}.Encode()
+	signed := auth.SignFrame(r.apiKey, inner)
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	var content []byte
+	for {
+		select {
+		case <-ctx.Done():
+			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+		case f := <-ch:
+			switch f.Type {
+			case proto.FrameTypeFileChunk:
+				c, err := fileproto.DecodeFileChunk(f.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+				}
+				if len(content)+len(c.Data) > maxBufferedOutput {
+					return mcpErrorResult(errcode.New("exceeds_max_size", "file exceeds 10 MB cap")), nil
+				}
+				content = append(content, c.Data...)
+			case proto.FrameTypeFileComplete:
+				c, _ := fileproto.DecodeFileComplete(f.Payload)
+				return buildReadFileResult(content, c), nil
+			case proto.FrameTypeError:
+				return mcpErrorResult(errcode.New(string(f.Payload), "daemon error")), nil
+			}
+		}
+	}
+}
+
+func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
+	if c.Err != "" {
+		return mcpErrorResult(errcode.New(c.Err, "read_file: "+c.Err))
+	}
+	var text string
+	if utf8.Valid(content) {
+		text = string(content)
+	} else {
+		text = fmt.Sprintf("(binary %d bytes, sha256=%s)", c.Size, c.Sha256)
+	}
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": text}},
+		"_meta": map[string]any{
+			"size":        c.Size,
+			"sha256":      c.Sha256,
+			"content_b64": base64.StdEncoding.EncodeToString(content),
+		},
+	}
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {
