@@ -73,6 +73,22 @@ func TestFrameDecodeVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestFrameTypePhase2Values(t *testing.T) {
+	cases := []struct {
+		ft   FrameType
+		want uint8
+	}{
+		{FrameTypeHello, 10},
+		{FrameTypeHelloAck, 11},
+		{FrameTypeRoute, 12},
+	}
+	for _, c := range cases {
+		if uint8(c.ft) != c.want {
+			t.Errorf("FrameType %v = %d, want %d", c.ft, uint8(c.ft), c.want)
+		}
+	}
+}
+
 func TestFrameDecodeShort(t *testing.T) {
 	cases := [][]byte{
 		{},           // empty
