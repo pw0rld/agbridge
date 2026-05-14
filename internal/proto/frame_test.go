@@ -89,6 +89,22 @@ func TestFrameTypePhase2Values(t *testing.T) {
 	}
 }
 
+func TestFrameTypePhase3Values(t *testing.T) {
+	cases := []struct {
+		ft   FrameType
+		want uint8
+	}{
+		{FrameTypeExecRequest, 20},
+		{FrameTypeExecChunk, 21},
+		{FrameTypeExecComplete, 22},
+	}
+	for _, c := range cases {
+		if uint8(c.ft) != c.want {
+			t.Errorf("FrameType %v = %d, want %d", c.ft, uint8(c.ft), c.want)
+		}
+	}
+}
+
 func TestFrameDecodeShort(t *testing.T) {
 	cases := [][]byte{
 		{},           // empty
