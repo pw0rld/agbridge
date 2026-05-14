@@ -1,0 +1,15 @@
+# Binaries
+/agbridge
+/dist/
+
+# Test artifacts
+*.out
+*.test
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
