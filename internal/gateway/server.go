@@ -130,8 +130,36 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, cfg *config.
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 
 	apiKey := []byte(h.Secret)
+
+	// Look up the daemon once at bridge-connect time. Phase 3 limitation:
+	// if the daemon disconnects mid-session, bridge sees stale frames /
+	// errors until reconnect (Phase 4 adds dynamic re-lookup + reconnect).
+	dconn, ok := reg.Lookup(h.TargetDaemon)
+	if !ok {
+		_ = c.Send(ctx, errFrame("daemon_offline"))
+		_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
+		return
+	}
+
+	// Pump daemon → bridge asynchronously so a single bridge request can
+	// receive multiple response frames (chunks + complete).
+	bridgeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		for {
+			resp, err := dconn.Recv(bridgeCtx)
+			if err != nil {
+				return
+			}
+			if err := c.Send(bridgeCtx, resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	// bridge → daemon main loop.
 	for {
-		f, err := c.Recv(ctx)
+		f, err := c.Recv(bridgeCtx)
 		if err != nil {
 			return
 		}
@@ -140,29 +168,15 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, cfg *config.
 		}
 		inner, err := auth.VerifyFrame(apiKey, f.Payload)
 		if err != nil {
-			_ = c.Send(ctx, errFrame("bad_mac"))
+			_ = c.Send(bridgeCtx, errFrame("bad_mac"))
 			_ = aud.Append(map[string]any{"event": "mac_failed", "agent": h.Name, "target": h.TargetDaemon})
 			return
 		}
-		dconn, ok := reg.Lookup(h.TargetDaemon)
-		if !ok {
-			_ = c.Send(ctx, errFrame("daemon_offline"))
-			_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
-			continue
-		}
 		_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon})
-		// forward inner frame bytes into daemon as a Route frame
-		if err := dconn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
-			_ = c.Send(ctx, errFrame("daemon_send_failed"))
-			continue
-		}
-		// wait for response from daemon
-		resp, err := dconn.Recv(ctx)
-		if err != nil {
-			_ = c.Send(ctx, errFrame("daemon_recv_failed"))
+		if err := dconn.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
+			_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
 			return
 		}
-		_ = c.Send(ctx, resp)
 	}
 }
 
