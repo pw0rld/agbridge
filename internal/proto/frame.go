@@ -17,8 +17,10 @@ const (
 )
 
 var (
-	ErrReqIDTooLong   = errors.New("proto: reqid exceeds 64 KB")
-	ErrPayloadTooLong = errors.New("proto: payload exceeds 64 MB")
+	ErrReqIDTooLong    = errors.New("proto: reqid exceeds 64 KB")
+	ErrPayloadTooLong  = errors.New("proto: payload exceeds 64 MB")
+	ErrShortFrame      = errors.New("proto: frame truncated")
+	ErrVersionMismatch = errors.New("proto: protocol version mismatch")
 )
 
 // FrameType identifies the kind of message carried in a Frame.
@@ -61,4 +63,41 @@ func (f Frame) Encode() ([]byte, error) {
 	buf = append(buf, pl...)
 	buf = append(buf, f.Payload...)
 	return buf, nil
+}
+
+// Decode parses the wire format. Returns ErrVersionMismatch on protocol skew,
+// ErrShortFrame on truncation, ErrPayloadTooLong on absurd payload_len.
+func Decode(b []byte) (Frame, error) {
+	if len(b) < 2 {
+		return Frame{}, ErrShortFrame
+	}
+	if b[0] != ProtocolVersion {
+		return Frame{}, ErrVersionMismatch
+	}
+	f := Frame{Type: FrameType(b[1])}
+	off := 2
+	if len(b) < off+2 {
+		return Frame{}, ErrShortFrame
+	}
+	ridLen := int(binary.BigEndian.Uint16(b[off : off+2]))
+	off += 2
+	if len(b) < off+ridLen {
+		return Frame{}, ErrShortFrame
+	}
+	f.ReqID = string(b[off : off+ridLen])
+	off += ridLen
+	if len(b) < off+4 {
+		return Frame{}, ErrShortFrame
+	}
+	plLen := int(binary.BigEndian.Uint32(b[off : off+4]))
+	off += 4
+	if plLen > maxPayloadLen {
+		return Frame{}, ErrPayloadTooLong
+	}
+	if len(b) < off+plLen {
+		return Frame{}, ErrShortFrame
+	}
+	f.Payload = make([]byte, plLen)
+	copy(f.Payload, b[off:off+plLen])
+	return f, nil
 }

@@ -49,3 +49,40 @@ func TestFrameEncodeReqIDTooLong(t *testing.T) {
 		t.Errorf("got %v, want ErrReqIDTooLong", err)
 	}
 }
+
+func TestFrameRoundTrip(t *testing.T) {
+	orig := Frame{Type: FrameTypePong, ReqID: "xyz", Payload: []byte("world")}
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Type != orig.Type || got.ReqID != orig.ReqID || !bytes.Equal(got.Payload, orig.Payload) {
+		t.Errorf("round trip mismatch: got %+v, want %+v", got, orig)
+	}
+}
+
+func TestFrameDecodeVersionMismatch(t *testing.T) {
+	bad := []byte{99, 1, 0, 0, 0, 0, 0, 0}
+	_, err := Decode(bad)
+	if !errors.Is(err, ErrVersionMismatch) {
+		t.Errorf("got %v, want ErrVersionMismatch", err)
+	}
+}
+
+func TestFrameDecodeShort(t *testing.T) {
+	cases := [][]byte{
+		{},           // empty
+		{1},          // only version
+		{1, 1},       // missing reqid_len
+		{1, 1, 0, 3}, // reqid_len=3 but no bytes
+	}
+	for i, c := range cases {
+		if _, err := Decode(c); !errors.Is(err, ErrShortFrame) {
+			t.Errorf("case %d: got %v, want ErrShortFrame", i, err)
+		}
+	}
+}
