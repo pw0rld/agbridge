@@ -41,10 +41,12 @@ type BridgeConfig struct {
 
 // DaemonConfig drives "agbridge daemon".
 type DaemonConfig struct {
-	GatewayURL        string `yaml:"gateway_url"`
-	DaemonName        string `yaml:"daemon_name"`
-	RegistrationToken string `yaml:"registration_token"`
-	CertPin           string `yaml:"cert_pin"`
+	GatewayURL        string   `yaml:"gateway_url"`
+	DaemonName        string   `yaml:"daemon_name"`
+	RegistrationToken string   `yaml:"registration_token"`
+	CertPin           string   `yaml:"cert_pin"`
+	AllowedExecCwds   []string `yaml:"allowed_exec_cwds"`
+	EnvAllowlist      []string `yaml:"env_allowlist"`
 }
 
 // LoadGateway parses a gateway YAML config from path and validates it.
