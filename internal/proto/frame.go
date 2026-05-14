@@ -27,9 +27,12 @@ var (
 type FrameType uint8
 
 const (
-	FrameTypePing  FrameType = 1
-	FrameTypePong  FrameType = 2
-	FrameTypeError FrameType = 3
+	FrameTypePing     FrameType = 1
+	FrameTypePong     FrameType = 2
+	FrameTypeError    FrameType = 3
+	FrameTypeHello    FrameType = 10
+	FrameTypeHelloAck FrameType = 11
+	FrameTypeRoute    FrameType = 12
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific
