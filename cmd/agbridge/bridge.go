@@ -96,6 +96,20 @@ func newBridgeCmd() *cobra.Command {
 				},
 			}, rt.readFileHandler)
 
+			srv.RegisterTool(mcp.ToolSpec{
+				Name:        "write_file",
+				Description: "Write a file on the remote daemon machine. content_b64 is base64-encoded content.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        map[string]any{"type": "string"},
+						"content_b64": map[string]any{"type": "string"},
+						"mode":        map[string]any{"type": "integer"},
+					},
+					"required": []string{"path", "content_b64"},
+				},
+			}, rt.writeFileHandler)
+
 			return srv.Serve(ctx, os.Stdin, os.Stdout)
 		},
 	}
@@ -337,6 +351,90 @@ func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 			"content_b64": base64.StdEncoding.EncodeToString(content),
 		},
 	}
+}
+
+type writeFileArgs struct {
+	Path       string `json:"path"`
+	ContentB64 string `json:"content_b64"`
+	Mode       uint32 `json:"mode"`
+}
+
+const writeChunkSize = 64 * 1024
+
+func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args writeFileArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	content, err := base64.StdEncoding.DecodeString(args.ContentB64)
+	if err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
+	}
+	if len(content) > maxBufferedOutput {
+		return mcpErrorResult(errcode.New("exceeds_max_size", "content exceeds 10 MB cap")), nil
+	}
+
+	reqID := newReqID()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	reqJSON, _ := fileproto.FileWriteRequest{Path: args.Path, Mode: args.Mode}.Encode()
+	inner, _ := proto.Frame{Type: proto.FrameTypeFileWriteRequest, ReqID: reqID, Payload: reqJSON}.Encode()
+	signed := auth.SignFrame(r.apiKey, inner)
+	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	if len(content) == 0 {
+		if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}); err != nil {
+			return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+		}
+	} else {
+		for off := 0; off < len(content); off += writeChunkSize {
+			end := off + writeChunkSize
+			if end > len(content) {
+				end = len(content)
+			}
+			chunk := fileproto.FileChunk{Data: content[off:end], Eof: end == len(content)}
+			if err := r.sendFileChunk(ctx, reqID, chunk); err != nil {
+				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+			}
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+		case f := <-ch:
+			switch f.Type {
+			case proto.FrameTypeFileComplete:
+				c, _ := fileproto.DecodeFileComplete(f.Payload)
+				if c.Err != "" {
+					return mcpErrorResult(errcode.New(c.Err, "write_file: "+c.Err)), nil
+				}
+				return map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("wrote %d bytes (sha256=%s)", c.Size, c.Sha256)}},
+					"_meta": map[string]any{
+						"bytes_written": c.Size,
+						"sha256":        c.Sha256,
+					},
+				}, nil
+			case proto.FrameTypeError:
+				return mcpErrorResult(errcode.New(string(f.Payload), "daemon error")), nil
+			}
+		}
+	}
+}
+
+func (r *router) sendFileChunk(ctx context.Context, reqID string, c fileproto.FileChunk) error {
+	payload, _ := c.Encode()
+	inner, _ := proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload}.Encode()
+	signed := auth.SignFrame(r.apiKey, inner)
+	return r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {
