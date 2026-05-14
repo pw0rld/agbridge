@@ -4,16 +4,19 @@ package wss
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport"
 )
 
-// Conn wraps a *websocket.Conn and speaks proto.Frame on top.
+// Conn wraps a *websocket.Conn and speaks proto.Frame on top. Send is
+// serialized internally; Recv is single-reader only.
 type Conn struct {
 	ws       *websocket.Conn
 	identity transport.Identity
+	writeMu  sync.Mutex
 }
 
 // NewConn wraps an existing *websocket.Conn (typically after upgrade/dial).
@@ -30,6 +33,8 @@ func (c *Conn) Send(ctx context.Context, f proto.Frame) error {
 	if err != nil {
 		return err
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return c.ws.WriteMessage(websocket.BinaryMessage, b)
 }
 
