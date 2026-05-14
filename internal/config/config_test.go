@@ -84,6 +84,32 @@ func TestLoadGatewayRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadDaemonWithSandbox(t *testing.T) {
+	yaml := `
+gateway_url: wss://gw/
+daemon_name: lab01
+registration_token: tok
+cert_pin: sha256:abc
+allowed_exec_cwds:
+  - /home/user/projects/*
+env_allowlist:
+  - PATH
+  - HOME
+  - LANG
+`
+	p := writeTemp(t, yaml)
+	cfg, err := LoadDaemon(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.AllowedExecCwds) != 1 || cfg.AllowedExecCwds[0] != "/home/user/projects/*" {
+		t.Errorf("allowed_exec_cwds: %+v", cfg.AllowedExecCwds)
+	}
+	if len(cfg.EnvAllowlist) != 3 {
+		t.Errorf("env_allowlist: %+v", cfg.EnvAllowlist)
+	}
+}
+
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "c.yaml")
