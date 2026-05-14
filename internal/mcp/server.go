@@ -116,18 +116,3 @@ func errorResp(id json.RawMessage, code int, msg string) jsonRPCMessage {
 	return jsonRPCMessage{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}}
 }
 
-// Placeholder declarations replaced in Task 8.
-type ToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
-type ToolSpec struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-}
-
-func (s *Server) listTools() any {
-	return map[string]any{"tools": []any{}}
-}
-
-func (s *Server) callTool(_ context.Context, req jsonRPCMessage) jsonRPCMessage {
-	return errorResp(req.ID, codeMethodNotFound, "no tools registered yet")
-}
