@@ -106,6 +106,10 @@ func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte) *router {
 	}
 }
 
+// runReader dispatches every inner frame by its ReqID. Per-call frames
+// (exec, read_file, write_file) and per-stream frames (port_forward
+// StreamAck/Data/Close) share the same routing table since the daemon
+// sets ReqID = streamID on stream frames.
 func (r *router) runReader() {
 	for {
 		f, err := r.conn.Recv(r.ctx)
@@ -145,6 +149,14 @@ func (r *router) unregisterCall(reqID string) {
 	delete(r.pending, reqID)
 	r.mu.Unlock()
 }
+
+// registerStream / unregisterStream are aliases for use by port_forward, to
+// make caller intent explicit. Stream IDs share the ReqID keyspace.
+func (r *router) registerStream(streamID string) <-chan proto.Frame {
+	return r.registerCall(streamID)
+}
+
+func (r *router) unregisterStream(streamID string) { r.unregisterCall(streamID) }
 
 type execArgs struct {
 	Cmd       string            `json:"cmd"`
