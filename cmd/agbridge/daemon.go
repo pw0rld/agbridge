@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -66,8 +65,8 @@ func newDaemonCmd() *cobra.Command {
 			state := &daemonState{
 				cfg:     cfg,
 				conn:    conn,
-				writes:  make(map[string]chan fileproto.FileChunk),
-				streams: make(map[string]chan streamproto.StreamData),
+				writes:  make(map[string]*writeSlot),
+				streams: make(map[string]*streamSlot),
 			}
 			for {
 				f, err := conn.Recv(ctx)
@@ -90,12 +89,21 @@ func newDaemonCmd() *cobra.Command {
 	return cmd
 }
 
+type writeSlot struct {
+	inbound chan fileproto.FileChunk
+}
+
+type streamSlot struct {
+	inbound chan streamproto.StreamData
+	cancel  context.CancelFunc
+}
+
 type daemonState struct {
 	cfg     *config.DaemonConfig
 	conn    *wss.Conn
 	mu      sync.Mutex
-	writes  map[string]chan fileproto.FileChunk
-	streams map[string]chan streamproto.StreamData
+	writes  map[string]*writeSlot
+	streams map[string]*streamSlot
 }
 
 func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
@@ -107,11 +115,17 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 	case proto.FrameTypeFileReadRequest:
 		go s.handleRead(ctx, inner)
 	case proto.FrameTypeFileWriteRequest:
-		go s.handleWrite(ctx, inner)
+		slot := s.beginWrite(inner.ReqID)
+		go s.handleWrite(ctx, inner, slot)
 	case proto.FrameTypeFileChunk:
 		s.deliverFileChunk(ctx, inner)
 	case proto.FrameTypeStreamOpen:
-		go s.handleStreamOpen(ctx, inner)
+		req, err := streamproto.DecodeStreamOpen(inner.Payload)
+		if err != nil {
+			return
+		}
+		slot, streamCtx := s.beginStream(ctx, req.StreamID)
+		go s.handleStreamOpen(streamCtx, req, slot)
 	case proto.FrameTypeStreamData:
 		s.deliverStreamData(ctx, inner)
 	case proto.FrameTypeStreamClose:
@@ -164,28 +178,28 @@ func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
-func (s *daemonState) handleWrite(ctx context.Context, inner proto.Frame) {
-	req, err := fileproto.DecodeFileWriteRequest(inner.Payload)
-	if err != nil {
-		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
-		return
-	}
-	ch := make(chan fileproto.FileChunk, 8)
+func (s *daemonState) beginWrite(reqID string) *writeSlot {
+	slot := &writeSlot{inbound: make(chan fileproto.FileChunk, 8)}
 	s.mu.Lock()
-	s.writes[inner.ReqID] = ch
+	s.writes[reqID] = slot
 	s.mu.Unlock()
+	return slot
+}
+
+func (s *daemonState) handleWrite(ctx context.Context, inner proto.Frame, slot *writeSlot) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.writes, inner.ReqID)
 		s.mu.Unlock()
 	}()
-
+	req, err := fileproto.DecodeFileWriteRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
 	next := func() (fileproto.FileChunk, error) {
 		select {
-		case c, ok := <-ch:
-			if !ok {
-				return fileproto.FileChunk{}, io.ErrUnexpectedEOF
-			}
+		case c := <-slot.inbound:
 			return c, nil
 		case <-ctx.Done():
 			return fileproto.FileChunk{}, ctx.Err()
@@ -202,7 +216,7 @@ func (s *daemonState) emitFileComplete(ctx context.Context, reqID string, c file
 
 func (s *daemonState) deliverFileChunk(ctx context.Context, inner proto.Frame) {
 	s.mu.Lock()
-	ch, ok := s.writes[inner.ReqID]
+	slot, ok := s.writes[inner.ReqID]
 	s.mu.Unlock()
 	if !ok {
 		return
@@ -212,35 +226,37 @@ func (s *daemonState) deliverFileChunk(ctx context.Context, inner proto.Frame) {
 		return
 	}
 	select {
-	case ch <- c:
+	case slot.inbound <- c:
 	case <-ctx.Done():
 	}
 }
 
-func (s *daemonState) handleStreamOpen(ctx context.Context, inner proto.Frame) {
-	req, err := streamproto.DecodeStreamOpen(inner.Payload)
-	if err != nil {
-		return
-	}
-	ch := make(chan streamproto.StreamData, 64)
+func (s *daemonState) beginStream(parent context.Context, streamID string) (*streamSlot, context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	slot := &streamSlot{inbound: make(chan streamproto.StreamData, 64), cancel: cancel}
 	s.mu.Lock()
-	s.streams[req.StreamID] = ch
+	s.streams[streamID] = slot
 	s.mu.Unlock()
+	return slot, ctx
+}
+
+func (s *daemonState) handleStreamOpen(ctx context.Context, req streamproto.StreamOpen, slot *streamSlot) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.streams, req.StreamID)
 		s.mu.Unlock()
+		slot.cancel()
 	}()
 	sender := func(f proto.Frame) error {
 		s.sendInner(ctx, f)
 		return nil
 	}
-	_ = tools.HandleStreamOpen(ctx, req, s.cfg.ForbiddenPorts, ch, sender)
+	_ = tools.HandleStreamOpen(ctx, req, s.cfg.ForbiddenPorts, slot.inbound, sender)
 }
 
 func (s *daemonState) deliverStreamData(ctx context.Context, inner proto.Frame) {
 	s.mu.Lock()
-	ch, ok := s.streams[inner.ReqID]
+	slot, ok := s.streams[inner.ReqID]
 	s.mu.Unlock()
 	if !ok {
 		return
@@ -250,19 +266,16 @@ func (s *daemonState) deliverStreamData(ctx context.Context, inner proto.Frame) 
 		return
 	}
 	select {
-	case ch <- d:
+	case slot.inbound <- d:
 	case <-ctx.Done():
 	}
 }
 
 func (s *daemonState) closeStream(streamID string) {
 	s.mu.Lock()
-	ch, ok := s.streams[streamID]
-	if ok {
-		delete(s.streams, streamID)
-	}
+	slot, ok := s.streams[streamID]
 	s.mu.Unlock()
 	if ok {
-		close(ch)
+		slot.cancel()
 	}
 }
