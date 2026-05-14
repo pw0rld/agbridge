@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"net"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
@@ -23,6 +25,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
+	"github.com/pw0rld/agbridge/internal/streamproto"
 	"github.com/pw0rld/agbridge/internal/transport"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
@@ -109,6 +112,20 @@ func newBridgeCmd() *cobra.Command {
 					"required": []string{"path", "content_b64"},
 				},
 			}, rt.writeFileHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name:        "port_forward",
+				Description: "Bind a local TCP listener that forwards new connections to remote_host:remote_port on the daemon machine.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"remote_host": map[string]any{"type": "string"},
+						"remote_port": map[string]any{"type": "integer"},
+						"local_port":  map[string]any{"type": "integer"},
+					},
+					"required": []string{"remote_host", "remote_port"},
+				},
+			}, rt.portForwardHandler)
 
 			return srv.Serve(ctx, os.Stdin, os.Stdout)
 		},
@@ -435,6 +452,140 @@ func (r *router) sendFileChunk(ctx context.Context, reqID string, c fileproto.Fi
 	inner, _ := proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload}.Encode()
 	signed := auth.SignFrame(r.apiKey, inner)
 	return r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
+}
+
+type portForwardArgs struct {
+	RemoteHost string `json:"remote_host"`
+	RemotePort int    `json:"remote_port"`
+	LocalPort  int    `json:"local_port"`
+}
+
+const (
+	streamAckTimeout      = 10 * time.Second
+	streamReadBuffer      = 32 * 1024
+	portForwardListenHost = "127.0.0.1"
+)
+
+func (r *router) portForwardHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args portForwardArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.RemoteHost == "" || args.RemotePort == 0 {
+		return mcpErrorResult(errcode.New("bad_payload", "remote_host and remote_port required")), nil
+	}
+	addr := fmt.Sprintf("%s:%d", portForwardListenHost, args.LocalPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return mcpErrorResult(errcode.New("listen_failed", err.Error())), nil
+	}
+	tcpAddr := ln.Addr().(*net.TCPAddr)
+	go r.portForwardAcceptLoop(ctx, ln, args.RemoteHost, args.RemotePort)
+	text := fmt.Sprintf("listening on %s:%d → %s:%d", portForwardListenHost, tcpAddr.Port, args.RemoteHost, args.RemotePort)
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": text}},
+		"_meta": map[string]any{
+			"local_host": portForwardListenHost,
+			"local_port": tcpAddr.Port,
+		},
+	}, nil
+}
+
+func (r *router) portForwardAcceptLoop(ctx context.Context, ln net.Listener, host string, port int) {
+	defer ln.Close()
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go r.portForwardStream(ctx, conn, host, port)
+	}
+}
+
+func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host string, port int) {
+	defer conn.Close()
+	streamID := newReqID()
+	ch := r.registerStream(streamID)
+	defer r.unregisterStream(streamID)
+
+	openPayload, _ := streamproto.StreamOpen{StreamID: streamID, RemoteHost: host, RemotePort: port}.Encode()
+	openInner, _ := proto.Frame{Type: proto.FrameTypeStreamOpen, ReqID: streamID, Payload: openPayload}.Encode()
+	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, openInner)}); err != nil {
+		return
+	}
+
+	ackCtx, ackCancel := context.WithTimeout(ctx, streamAckTimeout)
+	defer ackCancel()
+	for {
+		select {
+		case <-ackCtx.Done():
+			return
+		case f := <-ch:
+			if f.Type == proto.FrameTypeStreamAck {
+				ack, _ := streamproto.DecodeStreamAck(f.Payload)
+				if !ack.Ok {
+					return
+				}
+				goto connected
+			}
+		}
+	}
+connected:
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		defer cancel()
+		buf := make([]byte, streamReadBuffer)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				sdPayload, _ := streamproto.StreamData{StreamID: streamID, Data: data}.Encode()
+				sdInner, _ := proto.Frame{Type: proto.FrameTypeStreamData, ReqID: streamID, Payload: sdPayload}.Encode()
+				if serr := r.conn.Send(streamCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, sdInner)}); serr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer cancel()
+		for {
+			select {
+			case <-streamCtx.Done():
+				return
+			case f := <-ch:
+				switch f.Type {
+				case proto.FrameTypeStreamData:
+					sd, err := streamproto.DecodeStreamData(f.Payload)
+					if err != nil {
+						return
+					}
+					if _, werr := conn.Write(sd.Data); werr != nil {
+						return
+					}
+				case proto.FrameTypeStreamClose:
+					return
+				}
+			}
+		}
+	}()
+
+	<-streamCtx.Done()
+
+	closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
+	closeInner, _ := proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload}.Encode()
+	_ = r.conn.Send(context.Background(), proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, closeInner)})
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {
