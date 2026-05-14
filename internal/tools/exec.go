@@ -64,8 +64,10 @@ func Exec(ctx context.Context, req execproto.ExecRequest, allowedCwds, envAllowl
 	go streamChunks(&wg, stdout, "stdout", onChunk)
 	go streamChunks(&wg, stderr, "stderr", onChunk)
 
-	waitErr := cmd.Wait()
+	// Drain pipes before cmd.Wait — Wait closes parent pipe ends, so calling
+	// it before goroutines reach EOF can truncate fast-exiting commands.
 	wg.Wait()
+	waitErr := cmd.Wait()
 	dur := time.Since(start)
 
 	complete := execproto.ExecComplete{
