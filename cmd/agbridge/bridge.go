@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -50,8 +52,19 @@ func newBridgeCmd() *cobra.Command {
 			if err := auth.AttachCertPin(tlsCfg, cfg.CertPin); err != nil {
 				return fmt.Errorf("cert pin: %w", err)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+
+			// On SIGTERM/SIGINT, exit immediately. os.Stdin.Close() does not
+			// reliably wake bufio.Scanner's blocked Read on Linux (stdin is
+			// not in pollable mode), so a soft shutdown is impractical.
+			// The bridge has no shared state beyond the WSS conn, which the
+			// gateway will detect-and-tear-down on disconnect.
+			go func() {
+				<-ctx.Done()
+				fmt.Fprintln(os.Stderr, "bridge: shutdown signal received")
+				os.Exit(0)
+			}()
 
 			rt := newRouter(ctx, nil, []byte(cfg.APIKey))
 
@@ -123,7 +136,13 @@ func newBridgeCmd() *cobra.Command {
 				},
 			}, rt.portForwardHandler)
 
-			return srv.Serve(ctx, os.Stdin, os.Stdout)
+			err = srv.Serve(ctx, os.Stdin, os.Stdout)
+			// Closed-fd errors from SIGTERM-triggered stdin close are
+			// expected; treat them as graceful shutdown.
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to bridge YAML config")

@@ -2,8 +2,8 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -39,7 +39,7 @@ func HandleStreamOpen(ctx context.Context, req streamproto.StreamOpen, forbidden
 		}
 	}
 
-	addr := fmt.Sprintf("%s:%d", req.RemoteHost, req.RemotePort)
+	addr := net.JoinHostPort(req.RemoteHost, strconv.Itoa(req.RemotePort))
 	conn, err := net.DialTimeout("tcp", addr, streamDialTimeout)
 	if err != nil {
 		return emitAck(false, err.Error())
