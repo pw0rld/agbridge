@@ -61,11 +61,11 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 			TokenHash: "sha256:" + auth.SHA256Hex([]byte("daemon-tok-1")),
 		}},
 	}
-	addr, _, err := gateway.Run(ctx, srvCfg, cfg, aud)
+	inst, err := gateway.Run(ctx, srvCfg, cfg, aud)
 	if err != nil {
 		t.Fatalf("gateway: %v", err)
 	}
-	u := (&url.URL{Scheme: "wss", Host: addr.String(), Path: "/"}).String()
+	u := (&url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}).String()
 
 	dconn, err := wss.Dial(ctx, u, transport.Credentials{}, cliCfg)
 	if err != nil {

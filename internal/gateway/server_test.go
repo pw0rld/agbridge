@@ -57,11 +57,11 @@ func TestHandshakeBridgeOK(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, _, err := Run(ctx, srvCfg, cfg, w)
+	inst, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	u := url.URL{Scheme: "wss", Host: addr.String(), Path: "/"}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
 	c, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -88,11 +88,11 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, _, err := Run(ctx, srvCfg, cfg, w)
+	inst, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	u := url.URL{Scheme: "wss", Host: addr.String(), Path: "/"}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
 	c, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -119,11 +119,11 @@ func TestBridgePingRoutesToDaemon(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, _, err := Run(ctx, srvCfg, cfg, w)
+	inst, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	u := url.URL{Scheme: "wss", Host: addr.String(), Path: "/"}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
 
 	// daemon side
 	daemonConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
