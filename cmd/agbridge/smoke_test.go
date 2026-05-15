@@ -362,6 +362,97 @@ func TestSmokePhase5ReconnectAfterDrop(t *testing.T) {
 	}
 }
 
+func TestSmokePhase5SIGHUPRevoke(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	aud, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer aud.Close()
+
+	cfg := &config.GatewayConfig{
+		Listen:    "127.0.0.1:0",
+		AuditPath: auditPath,
+		Agents: []config.AgentEntry{
+			{Name: "alpha", APIKeyHash: "sha256:" + auth.SHA256Hex([]byte("k-alpha")), AllowedDaemons: []string{"lab01"}},
+			{Name: "bravo", APIKeyHash: "sha256:" + auth.SHA256Hex([]byte("k-bravo")), AllowedDaemons: []string{"lab01"}},
+		},
+		Daemons: []config.DaemonEntry{
+			{Name: "lab01", TokenHash: "sha256:" + auth.SHA256Hex([]byte("daemon-tok-1"))},
+		},
+	}
+	inst, err := gateway.Run(ctx, srvCfg, cfg, aud)
+	if err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+	u := (&url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}).String()
+
+	// Daemon online so both bridges' handshake passes (TargetDaemon=lab01).
+	dconn, err := wss.Dial(ctx, u, transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	defer dconn.Close()
+	dh, _ := handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1"}.Encode()
+	_ = dconn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: dh})
+	if ack, _ := dconn.Recv(ctx); ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon ack: %v", ack.Type)
+	}
+	go runFakeDaemon(ctx, dconn, &config.DaemonConfig{})
+
+	dialBridge := func(name, secret string) *wss.Conn {
+		c, err := wss.Dial(ctx, u, transport.Credentials{}, cliCfg)
+		if err != nil {
+			t.Fatalf("dial %s: %v", name, err)
+		}
+		bh, _ := handshake.Hello{Role: "bridge", Name: name, Secret: secret, TargetDaemon: "lab01"}.Encode()
+		_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: bh})
+		if ack, _ := c.Recv(ctx); ack.Type != proto.FrameTypeHelloAck {
+			t.Fatalf("%s ack: %v", name, ack.Type)
+		}
+		return c
+	}
+	alphaConn := dialBridge("alpha", "k-alpha")
+	defer alphaConn.Close()
+	bravoConn := dialBridge("bravo", "k-bravo")
+	defer bravoConn.Close()
+
+	// Reload config: remove alpha.
+	newCfg := &config.GatewayConfig{
+		Listen:    cfg.Listen,
+		AuditPath: cfg.AuditPath,
+		Agents: []config.AgentEntry{
+			{Name: "bravo", APIKeyHash: "sha256:" + auth.SHA256Hex([]byte("k-bravo")), AllowedDaemons: []string{"lab01"}},
+		},
+		Daemons: cfg.Daemons,
+	}
+	inst.Creds.Replace(newCfg)
+	revoked := inst.Sessions.Revoke(inst.Creds)
+	if len(revoked) != 1 || revoked[0] != "bridge/alpha" {
+		t.Errorf("revoked = %v, want [bridge/alpha]", revoked)
+	}
+
+	// Alpha's conn should error on Recv within ~200ms.
+	alphaCtx, alphaCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer alphaCancel()
+	if _, err := alphaConn.Recv(alphaCtx); err == nil {
+		t.Errorf("alpha conn still alive after revoke")
+	}
+
+	// Bravo's conn should still work — send a Route frame and expect no
+	// immediate error. (Receiving a valid response requires the full
+	// daemon/router stack; we only assert the conn hasn't been closed.)
+	bravoCtx, bravoCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer bravoCancel()
+	if err := bravoConn.Send(bravoCtx, proto.Frame{Type: proto.FrameTypePing, ReqID: "k"}); err != nil {
+		t.Errorf("bravo conn died too: %v", err)
+	}
+}
+
 func TestSmokePhase5InflightCallReturnsNetworkLost(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
