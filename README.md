@@ -15,91 +15,63 @@ revocation, and size-based audit log rotation.
 go build ./cmd/agbridge
 ```
 
-## Quickstart (single machine, manual)
+## Quickstart (3-machine deploy, one command)
 
-1. Generate a self-signed TLS pair for the gateway:
-
-```
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
-  -subj "/CN=localhost" -keyout gw.key -out gw.crt
-```
-
-2. Compute the cert pin (paste into bridge.yaml + daemon.yaml):
+`agbridge bootstrap` generates everything in one shot — cert, key, and
+three aligned YAML configs — so you don't have to run `openssl`, compute
+hashes, or paste pins between files.
 
 ```
-echo "sha256:$(openssl x509 -in gw.crt -outform der | sha256sum | cut -d' ' -f1)"
+agbridge bootstrap \
+  --gateway-url wss://gw.example.com/ \
+  --agent claude-laptop \
+  --daemon lab01 \
+  --allowed-paths /home/me/projects \
+  --out ./agbridge-cfg
 ```
 
-3. Write `gateway.yaml`:
+Output (in `./agbridge-cfg/`):
+- `cert.pem` + `key.pem` — deploy to the gateway host
+- `gateway.yaml` — deploy to the gateway host
+- `daemon.yaml` — deploy to the daemon host
+- `bridge.yaml` — stays on the laptop where the MCP client runs
 
-```yaml
-listen: 127.0.0.1:8443
-audit_path: ./audit.jsonl
-audit_max_bytes: 104857600      # 100 MB, optional; 0 = no rotation
-audit_max_backups: 3            # keep .1 .. .3; 0 = no rotation
-agents:
-  - name: claude-laptop
-    api_key_hash: sha256:<sha256 hex of your api key>
-    allowed_daemons: [lab01]
-daemons:
-  - name: lab01
-    token_hash: sha256:<sha256 hex of your daemon token>
-```
+The command prints next-steps with the `scp` commands and the MCP client
+config snippet you need. For automation, pass `--json` to get a structured
+result the calling agent can parse.
 
-Send `SIGHUP` to the running gateway to re-read this file. Any session
-whose Role/Name/KeyHash no longer matches the reloaded config is closed
-within milliseconds; other sessions are untouched.
-
-(Compute hashes: `printf 'api-key-1' | sha256sum`.)
-
-4. Write `daemon.yaml`:
-
-```yaml
-gateway_url: wss://127.0.0.1:8443/
-daemon_name: lab01
-registration_token: <your daemon token>
-cert_pin: sha256:<pin from step 2>
-allowed_exec_cwds:
-  - /tmp/agbridge-demo/*
-allowed_read_paths:
-  - /tmp/agbridge-demo/*
-allowed_write_paths:
-  - /tmp/agbridge-demo/*
-forbidden_ports:
-  - 22
-  - 2375
-env_allowlist:
-  - PATH
-  - HOME
-  - LANG
-```
-
-`allowed_read_paths` / `allowed_write_paths` use the same prefix-glob
-matching as `allowed_exec_cwds`. `forbidden_ports` is checked by the daemon
-before dialing for `port_forward`; the bridge listener is unaffected.
-
-5. Write `bridge.yaml`:
-
-```yaml
-gateway_url: wss://127.0.0.1:8443/
-agent_name: claude-laptop
-api_key: <your api key>
-cert_pin: sha256:<pin from step 2>
-target_daemon: lab01
-```
-
-6. Run all three (in three terminals):
+**Deploy and run:**
 
 ```
-./agbridge gateway --config gateway.yaml --cert gw.crt --key gw.key
-./agbridge daemon  --config daemon.yaml
-./agbridge bridge  --config bridge.yaml
+# Gateway host
+scp cert.pem key.pem gateway.yaml gw-host:/etc/agbridge/
+ssh gw-host 'agbridge gateway --config /etc/agbridge/gateway.yaml --cert /etc/agbridge/cert.pem --key /etc/agbridge/key.pem'
+
+# Daemon host (run as non-root)
+scp daemon.yaml daemon-host:/etc/agbridge/
+ssh daemon-host 'agbridge daemon --config /etc/agbridge/daemon.yaml'
+
+# Bridge host: register with your MCP client (Claude Code etc.)
+#   { "mcpServers": { "agbridge": { "command": "agbridge",
+#       "args": ["bridge", "--config", "/path/to/bridge.yaml"] } } }
 ```
 
-7. In your MCP client (e.g., Claude Code), register the bridge as an MCP
-   server with command `./agbridge` and args `["bridge", "--config",
-   "bridge.yaml"]`. The agent will see four tools: `exec`, `read_file`,
-   `write_file`, `port_forward`.
+The agent will see four tools: `exec`, `read_file`, `write_file`, `port_forward`.
+
+## Helper subcommands
+
+`bootstrap` is the orchestrator. The individual building blocks are also
+exposed for non-default setups:
+
+```
+agbridge cert gen --cn gw.example.com --out /etc/agbridge
+# Writes cert.pem + key.pem; prints SHA-256 pin
+
+agbridge keygen
+# Random base64 secret + sha256 hash (used for API keys and daemon tokens)
+```
+
+Both accept `--json` for machine-readable output.
 
 ## Tools
 
@@ -149,11 +121,26 @@ non-root + cwd allowlist + env whitelist.
   oldest `.N` is dropped, others shift up, active file renamed to `.1`.
   Set both to zero for legacy single-file append.
 
+## Manual setup (without `bootstrap`)
+
+For multi-tenant configs or custom layouts, you can build the YAMLs by
+hand. The 5 fields that must line up across files:
+
+| Source | Field | Used in |
+|---|---|---|
+| `agbridge cert gen` | SHA-256 pin | `daemon.yaml.cert_pin`, `bridge.yaml.cert_pin` |
+| `agbridge keygen` (#1) | secret | `bridge.yaml.api_key` |
+| same (#1) | hash | `gateway.yaml.agents[].api_key_hash` |
+| `agbridge keygen` (#2) | secret | `daemon.yaml.registration_token` |
+| same (#2) | hash | `gateway.yaml.daemons[].token_hash` |
+
+See `agbridge {gateway,daemon,bridge} --help` for the full YAML schema.
+
 ## Known limitations
 
 - Single-bridge-per-daemon (multiple bridges targeting the same daemon
   unsubscribe each other from the daemon proxy on connect).
-- Tested in-process only; manual three-machine deployment not yet
-  verified for 7×24h uptime / 30% loss tolerance.
+- Tested in-process and via binary smoke tests; manual three-machine
+  deployment not yet verified for 7×24h uptime / 30% loss tolerance.
 - Per-tool ACL (`allowed_tools`) and seccomp/cgroup hardening are deferred
   to v0.2.
