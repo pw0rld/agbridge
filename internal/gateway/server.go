@@ -104,7 +104,8 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
 		return
 	}
-	if err := reg.Register(h.Name, c); err != nil {
+	proxy := NewDaemonProxy(c)
+	if err := reg.Register(h.Name, proxy); err != nil {
 		_ = c.Send(ctx, errFrame("duplicate_daemon"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name, "reason": "duplicate"})
 		return
@@ -116,9 +117,17 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
-	// The daemon connection is read by handleBridge via the online-daemon
-	// registry; here we just block until shutdown (or revocation closes c).
-	<-ctx.Done()
+	// Read loop owned by handleDaemon (not by any individual bridge): each
+	// frame is routed to the currently-subscribed bridge writer or dropped
+	// if no bridge is connected. When the conn dies (revocation, network),
+	// Recv returns and we unregister.
+	for {
+		f, err := c.Recv(ctx)
+		if err != nil {
+			return
+		}
+		_ = proxy.Deliver(ctx, f)
+	}
 }
 
 func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instance, reg *Registry, aud *audit.Writer) {
@@ -142,31 +151,22 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 
 	apiKey := []byte(h.Secret)
 
-	// Look up the daemon once at bridge-connect time. Phase 3 limitation:
-	// if the daemon disconnects mid-session, bridge sees stale frames /
-	// errors until reconnect (Phase 4 adds dynamic re-lookup + reconnect).
-	dconn, ok := reg.Lookup(h.TargetDaemon)
+	proxy, ok := reg.Lookup(h.TargetDaemon)
 	if !ok {
 		_ = c.Send(ctx, errFrame("daemon_offline"))
 		_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
 		return
 	}
 
-	// Pump daemon → bridge asynchronously so a single bridge request can
-	// receive multiple response frames (chunks + complete).
+	// Subscribe to daemon→bridge frames for the duration of this session.
+	// On return, clear the writer so the daemon read loop in handleDaemon
+	// drops further frames instead of writing to a dead bconn.
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go func() {
-		for {
-			resp, err := dconn.Recv(bridgeCtx)
-			if err != nil {
-				return
-			}
-			if err := c.Send(bridgeCtx, resp); err != nil {
-				return
-			}
-		}
-	}()
+	proxy.SetWriter(func(_ context.Context, f proto.Frame) error {
+		return c.Send(bridgeCtx, f)
+	})
+	defer proxy.SetWriter(nil)
 
 	// bridge → daemon main loop.
 	for {
@@ -184,7 +184,7 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 			return
 		}
 		_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon})
-		if err := dconn.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
+		if err := proxy.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
 			_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
 			return
 		}
