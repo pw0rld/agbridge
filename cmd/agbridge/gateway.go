@@ -41,7 +41,7 @@ func newGatewayCmd() *cobra.Command {
 			defer aud.Close()
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			addr, err := gateway.Run(ctx, tlsCfg, cfg, aud)
+			addr, _, err := gateway.Run(ctx, tlsCfg, cfg, aud)
 			if err != nil {
 				return err
 			}
