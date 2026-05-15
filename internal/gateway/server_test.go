@@ -68,7 +68,8 @@ func TestHandshakeBridgeOK(t *testing.T) {
 	}
 	defer c.Close()
 	sendHello(t, ctx, c, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
-	deadline, _ := context.WithTimeout(ctx, 2*time.Second)
+	deadline, dcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer dcancel()
 	ack, err := c.Recv(deadline)
 	if err != nil {
 		t.Fatalf("recv: %v", err)
@@ -99,7 +100,8 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 	}
 	defer c.Close()
 	sendHello(t, ctx, c, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "WRONG", TargetDaemon: "lab01"})
-	deadline, _ := context.WithTimeout(ctx, 2*time.Second)
+	deadline, dcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer dcancel()
 	f, err := c.Recv(deadline)
 	if err != nil {
 		t.Fatalf("recv: %v", err)
@@ -174,7 +176,8 @@ func TestBridgePingRoutesToDaemon(t *testing.T) {
 	if err := bridgeConn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
 		t.Fatalf("bridge send route: %v", err)
 	}
-	deadline, _ := context.WithTimeout(ctx, 2*time.Second)
+	deadline, dcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer dcancel()
 	resp, err := bridgeConn.Recv(deadline)
 	if err != nil {
 		t.Fatalf("bridge recv: %v", err)

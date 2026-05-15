@@ -106,9 +106,18 @@ func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCf
 // parent ctx cancels. A per-session ctx is derived and cancelled before
 // return so in-flight tool goroutines (handleExec / handleWrite /
 // handleStreamOpen) exit promptly rather than leaking until parent cancel.
+//
+// gorilla/websocket.ReadMessage doesn't honor a Go ctx, so we install a
+// watchdog goroutine that closes the conn when sessionCtx cancels —
+// otherwise SIGTERM would leave the daemon parked in Recv until the next
+// frame arrived.
 func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.DaemonConfig) {
 	sessionCtx, cancel := context.WithCancel(parent)
 	defer cancel()
+	go func() {
+		<-sessionCtx.Done()
+		_ = conn.Close()
+	}()
 	state := &daemonState{
 		cfg:     cfg,
 		conn:    conn,
