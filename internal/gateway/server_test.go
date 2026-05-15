@@ -57,7 +57,7 @@ func TestHandshakeBridgeOK(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, err := Run(ctx, srvCfg, cfg, w)
+	addr, _, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, err := Run(ctx, srvCfg, cfg, w)
+	addr, _, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBridgePingRoutesToDaemon(t *testing.T) {
 	}
 	defer w.Close()
 	cfg := newTestConfig(t)
-	addr, err := Run(ctx, srvCfg, cfg, w)
+	addr, _, err := Run(ctx, srvCfg, cfg, w)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

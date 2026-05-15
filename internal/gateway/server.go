@@ -26,13 +26,15 @@ type connIO interface {
 	Close() error
 }
 
-// Run starts the gateway. It returns the listener's actual address.
-func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (net.Addr, error) {
+// Run starts the gateway. It returns the listener's actual address, plus
+// the CredRegistry so callers (main / tests) can Replace it on SIGHUP.
+func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (net.Addr, *CredRegistry, error) {
 	ln, err := wss.Listen(ctx, cfg.Listen, tlsCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reg := NewRegistry()
+	creds := NewCredRegistry(cfg)
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -46,13 +48,13 @@ func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud
 				}
 				return
 			}
-			go handleConn(ctx, c, cfg, reg, aud)
+			go handleConn(ctx, c, creds, reg, aud)
 		}
 	}()
-	return ln.Addr(), nil
+	return ln.Addr(), creds, nil
 }
 
-func handleConn(ctx context.Context, c connIO, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
+func handleConn(ctx context.Context, c connIO, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
 	defer c.Close()
 	hello, ok := readHello(ctx, c)
 	if !ok {
@@ -61,9 +63,9 @@ func handleConn(ctx context.Context, c connIO, cfg *config.GatewayConfig, reg *R
 	}
 	switch hello.Role {
 	case "daemon":
-		handleDaemon(ctx, c, hello, cfg, reg, aud)
+		handleDaemon(ctx, c, hello, creds, reg, aud)
 	case "bridge":
-		handleBridge(ctx, c, hello, cfg, reg, aud)
+		handleBridge(ctx, c, hello, creds, reg, aud)
 	default:
 		_ = c.Send(ctx, errFrame("unknown_role"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "reason": "unknown_role", "name": hello.Name})
@@ -82,15 +84,9 @@ func readHello(ctx context.Context, c connIO) (handshake.Hello, bool) {
 	return h, true
 }
 
-func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
-	var entry *config.DaemonEntry
-	for i := range cfg.Daemons {
-		if cfg.Daemons[i].Name == h.Name {
-			entry = &cfg.Daemons[i]
-			break
-		}
-	}
-	if entry == nil || !auth.SecretMatches(h.Secret, entry.TokenHash) {
+func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
+	entry, ok := creds.LookupDaemon(h.Name)
+	if !ok || !auth.SecretMatches(h.Secret, entry.TokenHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
 		return
@@ -108,15 +104,9 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, cfg *config.
 	<-ctx.Done()
 }
 
-func handleBridge(ctx context.Context, c connIO, h handshake.Hello, cfg *config.GatewayConfig, reg *Registry, aud *audit.Writer) {
-	var entry *config.AgentEntry
-	for i := range cfg.Agents {
-		if cfg.Agents[i].Name == h.Name {
-			entry = &cfg.Agents[i]
-			break
-		}
-	}
-	if entry == nil || !auth.SecretMatches(h.Secret, entry.APIKeyHash) {
+func handleBridge(ctx context.Context, c connIO, h handshake.Hello, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
+	entry, ok := creds.LookupAgent(h.Name)
+	if !ok || !auth.SecretMatches(h.Secret, entry.APIKeyHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "bridge", "name": h.Name})
 		return
