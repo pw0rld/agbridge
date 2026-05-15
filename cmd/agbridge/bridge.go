@@ -20,6 +20,7 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -52,25 +53,17 @@ func newBridgeCmd() *cobra.Command {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			conn, err := wss.Dial(ctx, cfg.GatewayURL, transport.Credentials{}, tlsCfg)
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
+			rt := newRouter(ctx, nil, []byte(cfg.APIKey))
 
-			hello := handshake.Hello{Role: "bridge", Name: cfg.AgentName, Secret: cfg.APIKey, TargetDaemon: cfg.TargetDaemon}
-			helloPayload, _ := hello.Encode()
-			if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
-				return err
-			}
-			ack, err := conn.Recv(ctx)
-			if err != nil || ack.Type != proto.FrameTypeHelloAck {
-				return fmt.Errorf("handshake failed: %v", ack.Type)
+			// First connect synchronously so we never serve MCP before an
+			// initial handshake succeeds — otherwise the very first tool call
+			// would observe network_lost.
+			if err := bridgeDialAndAttach(ctx, rt, cfg, tlsCfg); err != nil {
+				return fmt.Errorf("initial handshake: %w", err)
 			}
 			fmt.Fprintln(os.Stderr, "bridge: handshake ok, starting MCP stdio server")
 
-			rt := newRouter(ctx, conn, []byte(cfg.APIKey))
-			go rt.runReader()
+			go superviseBridgeConn(ctx, rt, cfg, tlsCfg)
 
 			srv := mcp.NewServer()
 			srv.RegisterTool(mcp.ToolSpec{
@@ -186,6 +179,54 @@ func (r *router) send(ctx context.Context, f proto.Frame) error {
 		return errNoConn
 	}
 	return conn.Send(ctx, f)
+}
+
+// bridgeDialAndAttach dials the gateway, runs the bridge handshake, and
+// hands the live conn to rt via replaceConn. On any handshake failure it
+// closes the new conn and returns the error.
+func bridgeDialAndAttach(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) error {
+	conn, err := wss.Dial(ctx, cfg.GatewayURL, transport.Credentials{}, tlsCfg)
+	if err != nil {
+		return err
+	}
+	hello := handshake.Hello{Role: "bridge", Name: cfg.AgentName, Secret: cfg.APIKey, TargetDaemon: cfg.TargetDaemon}
+	helloPayload, _ := hello.Encode()
+	if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	ack, err := conn.Recv(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if ack.Type != proto.FrameTypeHelloAck {
+		_ = conn.Close()
+		return fmt.Errorf("handshake nack: %v", ack.Type)
+	}
+	rt.replaceConn(conn)
+	return nil
+}
+
+// superviseBridgeConn runs rt.runReader to completion (blocks until the
+// current conn dies), then loops via dialer.Loop to re-dial + re-handshake +
+// re-attach. In-flight tool calls are signalled via replaceConn(nil) so they
+// return network_lost(retryable=true). Exits when ctx cancels.
+func superviseBridgeConn(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) {
+	for {
+		rt.runReader()
+		if ctx.Err() != nil {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "bridge: connection lost, reconnecting…")
+		rt.replaceConn(nil)
+		if err := dialer.Loop(ctx, func(c context.Context) error {
+			return bridgeDialAndAttach(c, rt, cfg, tlsCfg)
+		}, dialer.Options{}); err != nil {
+			return
+		}
+		fmt.Fprintln(os.Stderr, "bridge: reconnected")
+	}
 }
 
 // runReader dispatches every inner frame by its ReqID until the conn dies
