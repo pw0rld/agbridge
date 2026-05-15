@@ -4,9 +4,10 @@ AI agent remote operation surface over restrictive networks (TLS:443 + MCP).
 
 See the [design spec](https://github.com/pw0rld/my-wiki/blob/main/wiki/ai-research/plan/agbridge.md) for goals.
 
-Status: Phase 4 — all four MCP tools (`exec` / `read_file` / `write_file` /
-`port_forward`) end-to-end. Resilience (reconnect, keepalive, SIGHUP reload,
-audit rotation) lands in Phase 5.
+Status: Phase 5 — four MCP tools end-to-end plus production-grade
+resilience: bridge + daemon auto-reconnect with exponential backoff,
+WebSocket-layer keepalive, SIGHUP-driven credential reload with session
+revocation, and size-based audit log rotation.
 
 ## Build
 
@@ -34,6 +35,8 @@ echo "sha256:$(openssl x509 -in gw.crt -outform der | sha256sum | cut -d' ' -f1)
 ```yaml
 listen: 127.0.0.1:8443
 audit_path: ./audit.jsonl
+audit_max_bytes: 104857600      # 100 MB, optional; 0 = no rotation
+audit_max_backups: 3            # keep .1 .. .3; 0 = no rotation
 agents:
   - name: claude-laptop
     api_key_hash: sha256:<sha256 hex of your api key>
@@ -42,6 +45,10 @@ daemons:
   - name: lab01
     token_hash: sha256:<sha256 hex of your daemon token>
 ```
+
+Send `SIGHUP` to the running gateway to re-read this file. Any session
+whose Role/Name/KeyHash no longer matches the reloaded config is closed
+within milliseconds; other sessions are untouched.
 
 (Compute hashes: `printf 'api-key-1' | sha256sum`.)
 
@@ -123,13 +130,30 @@ per `read_file` / `write_file`. `port_forward` streams are uncapped.
 bridge HMAC-signs every frame; gateway verifies + audits; daemon enforces
 non-root + cwd allowlist + env whitelist.
 
-## Limitations (Phase 4)
+## Resilience (Phase 5)
 
-- No reconnect / keepalive — a WSS drop kills the connection; the bridge
-  has to be restarted to recover (Phase 5).
-- No SIGHUP config reload; gateway / daemon must restart to pick up new
-  agents, daemons, or allowlists (Phase 5).
-- Audit log is single-file append-only with no rotation (Phase 5).
-- Single-bridge-per-daemon (multiple bridges targeting the same daemon may
-  race on shared state).
-- Tested in-process only; manual three-machine deployment not yet verified.
+- **Reconnect**: bridge and daemon both wrap their gateway dial in an
+  exponential-backoff loop (`Base=500ms`, `Cap=30s`, ±20% jitter). After a
+  WSS drop, in-flight tool calls return `network_lost` with
+  `retryable=true` so the agent can retry; subsequent calls go through the
+  fresh conn transparently.
+- **Keepalive**: every wss.Conn ticks WebSocket-layer Ping every 30s and
+  closes the conn if no Pong arrives within 90s — dead connections are
+  detected within ~2 minutes instead of waiting for TCP to time out.
+- **SIGHUP**: gateway re-reads its YAML config on `SIGHUP`. New agents /
+  daemons / rotated hashes take effect immediately; sessions whose
+  principal was removed (or whose key was rotated) are revoked surgically
+  without disturbing siblings.
+- **Audit rotation**: when `audit_max_bytes > 0` and `audit_max_backups > 0`,
+  the JSONL writer rotates synchronously before each over-budget write:
+  oldest `.N` is dropped, others shift up, active file renamed to `.1`.
+  Set both to zero for legacy single-file append.
+
+## Known limitations
+
+- Single-bridge-per-daemon (multiple bridges targeting the same daemon
+  unsubscribe each other from the daemon proxy on connect).
+- Tested in-process only; manual three-machine deployment not yet
+  verified for 7×24h uptime / 30% loss tolerance.
+- Per-tool ACL (`allowed_tools`) and seccomp/cgroup hardening are deferred
+  to v0.2.
