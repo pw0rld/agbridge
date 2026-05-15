@@ -13,6 +13,7 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
@@ -45,48 +46,89 @@ func newDaemonCmd() *cobra.Command {
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			conn, err := wss.Dial(ctx, cfg.GatewayURL, transport.Credentials{}, tlsCfg)
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
 
-			hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken}
-			helloPayload, _ := hello.Encode()
-			if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
-				return err
-			}
-			ack, err := conn.Recv(ctx)
-			if err != nil || ack.Type != proto.FrameTypeHelloAck {
-				return fmt.Errorf("handshake failed: %v", ack.Type)
-			}
-			fmt.Fprintln(os.Stderr, "daemon: handshake ok, awaiting Route frames")
-
-			state := &daemonState{
-				cfg:     cfg,
-				conn:    conn,
-				writes:  make(map[string]*writeSlot),
-				streams: make(map[string]*streamSlot),
-			}
 			for {
-				f, err := conn.Recv(ctx)
-				if err != nil {
-					return err
+				if ctx.Err() != nil {
+					return nil
 				}
-				if f.Type != proto.FrameTypeRoute {
-					continue
+				var conn *wss.Conn
+				if err := dialer.Loop(ctx, func(c context.Context) error {
+					cc, derr := daemonDialAndHandshake(c, cfg, tlsCfg)
+					if derr != nil {
+						return derr
+					}
+					conn = cc
+					return nil
+				}, dialer.Options{}); err != nil {
+					return nil
 				}
-				inner, err := proto.Decode(f.Payload)
-				if err != nil {
-					continue
+				fmt.Fprintln(os.Stderr, "daemon: handshake ok, awaiting Route frames")
+				runDaemonSession(ctx, conn, cfg)
+				_ = conn.Close()
+				if ctx.Err() != nil {
+					return nil
 				}
-				state.dispatch(ctx, inner)
+				fmt.Fprintln(os.Stderr, "daemon: connection lost, reconnecting…")
 			}
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "", "path to daemon YAML config")
 	_ = cmd.MarkFlagRequired("config")
 	return cmd
+}
+
+// daemonDialAndHandshake dials the gateway and runs the daemon-side
+// handshake. On any failure the new conn is closed.
+func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCfg *tls.Config) (*wss.Conn, error) {
+	conn, err := wss.Dial(ctx, cfg.GatewayURL, transport.Credentials{}, tlsCfg)
+	if err != nil {
+		return nil, err
+	}
+	hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken}
+	helloPayload, _ := hello.Encode()
+	if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	ack, err := conn.Recv(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if ack.Type != proto.FrameTypeHelloAck {
+		_ = conn.Close()
+		return nil, fmt.Errorf("handshake nack: %v", ack.Type)
+	}
+	return conn, nil
+}
+
+// runDaemonSession dispatches Route frames on conn until Recv errors or the
+// parent ctx cancels. A per-session ctx is derived and cancelled before
+// return so in-flight tool goroutines (handleExec / handleWrite /
+// handleStreamOpen) exit promptly rather than leaking until parent cancel.
+func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.DaemonConfig) {
+	sessionCtx, cancel := context.WithCancel(parent)
+	defer cancel()
+	state := &daemonState{
+		cfg:     cfg,
+		conn:    conn,
+		writes:  make(map[string]*writeSlot),
+		streams: make(map[string]*streamSlot),
+	}
+	for {
+		f, err := conn.Recv(sessionCtx)
+		if err != nil {
+			return
+		}
+		if f.Type != proto.FrameTypeRoute {
+			continue
+		}
+		inner, err := proto.Decode(f.Payload)
+		if err != nil {
+			continue
+		}
+		state.dispatch(sessionCtx, inner)
+	}
 }
 
 type writeSlot struct {
