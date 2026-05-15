@@ -73,25 +73,82 @@ agbridge keygen
 
 Both accept `--json` for machine-readable output.
 
-## Tools
+## Two ways to use agbridge
+
+agbridge ships four MCP tools but they sit at very different points on the
+power-vs-risk axis. **Most deployments should use the Pure Tunnel mode**
+and treat the other tools as opt-in escape hatches for environments that
+can't run sshd. See the design rationale in
+[wiki/believe/agbridge-pure-tunnel-vs-rpc](https://github.com/pw0rld/my-wiki/blob/main/wiki/ai-research/believe/agbridge-pure-tunnel-vs-rpc.md).
+
+### Recommended: Pure Tunnel + sshd
+
+Let agbridge do what it's uniquely good at — egress-only NAT/firewall
+traversal — and let `sshd` do what it's been hardened for over 25 years
+(authentication, authorization, audit, session management).
+
+1. On the daemon machine, make sure `sshd` is running with a normal
+   user account that has `authorized_keys` for your laptop.
+2. Use **only** `port_forward` to expose the daemon's port 22 to your
+   laptop:
+
+   ```
+   port_forward(remote_host=127.0.0.1, remote_port=22, local_port=2222)
+   ```
+3. Your AI client (Claude Code etc.) uses its native bash tool to ssh:
+
+   ```
+   ssh -p 2222 lab-user@localhost "make test"
+   scp -P 2222 -r lab-user@localhost:/home/lab-user/project ~/local-copy
+   ```
+
+You get:
+- Per-key authorization (`authorized_keys` with `command=` restrictions,
+  `from=` IP allowlists, `ForceCommand`, restricted shells).
+- Standard audit trail (sshd logs + auditd + your existing pipeline).
+- Whatever standard tool composes well over an SSH session.
+
+What you don't get:
+- A single "MCP tool" abstraction for command execution.
+- Per-call HMAC + audit at the agbridge protocol layer.
+
+For most internal-network scenarios where you control the lab machine,
+this is the right trade.
+
+### Advanced: full MCP RPC (use when you can't run sshd)
+
+If your daemon host can't run sshd (locked-down container, audit-only
+filesystem, a corporate policy that forbids opening new SSH endpoints,
+etc.), enable the other three tools. They're more convenient for the AI
+to call directly but their security relies on agbridge's own sandbox —
+not on Unix's user model.
 
 - **exec** — params: `cmd`, `args`, `cwd`, `env`, `timeout_ms`. Runs a
   subprocess on the daemon side, streams stdout/stderr back. Returns
   `exitcode`, `duration_ms`, base64-encoded output in `_meta`.
-- **read_file** — params: `path`, `max_size`. Streams a file back in 64 KB
-  chunks. Returns `size`, `sha256`, `content_b64` in `_meta`. UTF-8 valid
-  content is also surfaced as text in the result body.
+- **read_file** — params: `path`, `max_size`. Streams a file back in
+  64 KB chunks. Returns `size`, `sha256`, `content_b64` in `_meta`.
+  UTF-8 valid content is also surfaced as text in the result body.
 - **write_file** — params: `path`, `content_b64`, `mode`. Atomic write via
   temp file plus rename. Defaults to `mode=0644`. Returns `bytes_written`,
   `sha256`.
+
+The 10 MB cap applies to stdout/stderr per `exec` call and to total content
+per `read_file` / `write_file`.
+
+When using these tools, keep `allowed_exec_cwds` / `allowed_read_paths` /
+`allowed_write_paths` as narrow as your workflow allows — they are your
+only line of defense against AI misbehavior.
+
+### Always available
+
 - **port_forward** — params: `remote_host`, `remote_port`, `local_port`.
   Binds a local TCP listener (`local_port=0` lets the OS pick) and shuttles
   each accepted connection to `remote_host:remote_port` on the daemon
   machine over a multiplexed stream. Returns `local_host`, `local_port` in
-  `_meta`.
-
-The 10 MB cap applies to stdout/stderr per `exec` call and to total content
-per `read_file` / `write_file`. `port_forward` streams are uncapped.
+  `_meta`. `forbidden_ports` in daemon.yaml blocks dangerous targets
+  (default suggestion: include 22 only if you're NOT using the tunnel
+  pattern above).
 
 ## Architecture
 
@@ -138,9 +195,18 @@ See `agbridge {gateway,daemon,bridge} --help` for the full YAML schema.
 
 ## Known limitations
 
+- **No per-tool toggle yet**. The Pure Tunnel recommendation is currently
+  documentation-only — the daemon enables all four tools as long as their
+  allowed_*_paths / forbidden_ports are configured. Per-tool
+  `enabled_tools` config and a `strict_mode: port_forward only` are
+  planned for the next milestone. Until then, the most defensive thing
+  you can do is leave `allowed_exec_cwds` / `allowed_read_paths` /
+  `allowed_write_paths` empty in daemon.yaml — that effectively disables
+  exec / read_file / write_file by always-deny.
 - Single-bridge-per-daemon (multiple bridges targeting the same daemon
   unsubscribe each other from the daemon proxy on connect).
 - Tested in-process and via binary smoke tests; manual three-machine
-  deployment not yet verified for 7×24h uptime / 30% loss tolerance.
-- Per-tool ACL (`allowed_tools`) and seccomp/cgroup hardening are deferred
-  to v0.2.
+  deployment self-test passed (2026-05-15) but 7×24h uptime / 30% loss
+  tolerance not yet validated.
+- Per-agent ACL (`allowed_tools` on the gateway side) and seccomp/cgroup
+  hardening are deferred to v0.2.
