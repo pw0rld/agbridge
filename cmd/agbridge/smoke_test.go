@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -29,10 +30,40 @@ import (
 )
 
 // phase4Env is the shared gateway+daemon+bridge harness. The MCP server in
-// `srv` already has exec/read_file/write_file/port_forward registered.
+// `srv` already has exec/read_file/write_file/port_forward registered. The
+// gatewayURL and cliCfg are exposed so Phase 5 reconnect tests can drop the
+// bridge conn and re-dial without rebuilding the whole stack.
 type phase4Env struct {
-	ctx context.Context
-	srv *mcp.Server
+	ctx        context.Context
+	srv        *mcp.Server
+	rt         *router
+	gatewayURL string
+	cliCfg     *tls.Config
+}
+
+// reconnectBridge closes the bridge's current wss conn, waits for runReader
+// to notice, then re-dials + re-handshakes and attaches the new conn via
+// router.replaceConn. Returns once a fresh runReader goroutine is running.
+func (e *phase4Env) reconnectBridge(t *testing.T) {
+	t.Helper()
+	if c := e.rt.currentConn(); c != nil {
+		_ = c.Close()
+	}
+	// Wait briefly for runReader to exit on the dead conn.
+	time.Sleep(50 * time.Millisecond)
+	newConn, err := wss.Dial(e.ctx, e.gatewayURL, transport.Credentials{}, e.cliCfg)
+	if err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+	bh, _ := handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"}.Encode()
+	if err := newConn.Send(e.ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: bh}); err != nil {
+		t.Fatalf("rehandshake send: %v", err)
+	}
+	if ack, _ := newConn.Recv(e.ctx); ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("rehandshake ack: %v", ack.Type)
+	}
+	e.rt.replaceConn(newConn)
+	go e.rt.runReader()
 }
 
 func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
@@ -98,7 +129,7 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 	srv.RegisterTool(mcp.ToolSpec{Name: "write_file", InputSchema: map[string]any{"type": "object"}}, rt.writeFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "port_forward", InputSchema: map[string]any{"type": "object"}}, rt.portForwardHandler)
 
-	return &phase4Env{ctx: ctx, srv: srv}
+	return &phase4Env{ctx: ctx, srv: srv, rt: rt, gatewayURL: u, cliCfg: cliCfg}
 }
 
 // callTool drives one tools/call round-trip via stdin/stdout JSON-RPC and
@@ -292,6 +323,70 @@ func TestSmokePhase4PortForward(t *testing.T) {
 	}
 	if !bytes.Equal(got, msg) {
 		t.Errorf("echo mismatch: got %q want %q", got, msg)
+	}
+}
+
+func TestSmokePhase5ReconnectAfterDrop(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+
+	// 1. Baseline call works.
+	res := callTool(t, env, "exec", map[string]any{
+		"cmd":  "/bin/echo",
+		"args": []string{"before"},
+		"cwd":  tmpDir,
+	})
+	if int(res["_meta"].(map[string]any)["exitcode"].(float64)) != 0 {
+		t.Fatalf("baseline exitcode != 0: %+v", res["_meta"])
+	}
+
+	// 2. Drop the bridge↔gateway socket and re-attach a fresh conn.
+	env.reconnectBridge(t)
+
+	// 3. Subsequent call goes through the new conn.
+	res = callTool(t, env, "exec", map[string]any{
+		"cmd":  "/bin/echo",
+		"args": []string{"after"},
+		"cwd":  tmpDir,
+	})
+	if int(res["_meta"].(map[string]any)["exitcode"].(float64)) != 0 {
+		t.Fatalf("post-reconnect exitcode != 0: %+v", res["_meta"])
+	}
+	stdoutB64 := res["_meta"].(map[string]any)["stdout_b64"].(string)
+	out, _ := base64.StdEncoding.DecodeString(stdoutB64)
+	if !bytes.Contains(out, []byte("after")) {
+		t.Errorf("expected 'after' in stdout, got %q", out)
+	}
+}
+
+func TestSmokePhase5InflightCallReturnsNetworkLost(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+
+	// Register a reqID with a real channel, then drop the conn — the
+	// handler-style consumer should observe the closed channel via
+	// replaceConn(nil) and would translate to network_lost in the real
+	// handler path.
+	reqID := newReqID()
+	ch := env.rt.registerCall(reqID)
+	defer env.rt.unregisterCall(reqID)
+
+	// Force a "drop" by signaling pending.
+	env.rt.replaceConn(nil)
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Errorf("channel yielded a value, expected closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("channel not closed after replaceConn(nil)")
 	}
 }
 
