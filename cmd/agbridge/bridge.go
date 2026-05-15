@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"net"
@@ -31,6 +32,8 @@ import (
 )
 
 const maxBufferedOutput = 10 << 20
+
+var errNoConn = errors.New("bridge: no active connection")
 
 func newBridgeCmd() *cobra.Command {
 	var cfgPath string
@@ -137,9 +140,9 @@ func newBridgeCmd() *cobra.Command {
 
 type router struct {
 	ctx     context.Context
-	conn    *wss.Conn
 	apiKey  []byte
 	mu      sync.Mutex
+	conn    *wss.Conn
 	pending map[string]chan proto.Frame
 }
 
@@ -152,13 +155,52 @@ func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte) *router {
 	}
 }
 
-// runReader dispatches every inner frame by its ReqID. Per-call frames
-// (exec, read_file, write_file) and per-stream frames (port_forward
-// StreamAck/Data/Close) share the same routing table since the daemon
-// sets ReqID = streamID on stream frames.
+// currentConn returns the live wss.Conn under lock. Callers should treat the
+// returned pointer as ephemeral — a concurrent replaceConn may swap it out
+// immediately after.
+func (r *router) currentConn() *wss.Conn {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.conn
+}
+
+// replaceConn swaps in newConn and closes every pending call channel so the
+// in-flight handler returns network_lost. Caller is the outer reconnect
+// loop; replaceConn(nil) is a clean shutdown signal.
+func (r *router) replaceConn(newConn *wss.Conn) {
+	r.mu.Lock()
+	old := r.pending
+	r.pending = make(map[string]chan proto.Frame)
+	r.conn = newConn
+	r.mu.Unlock()
+	for _, ch := range old {
+		close(ch)
+	}
+}
+
+// send writes f via the current conn. Returns errNoConn if there's no live
+// connection (in a reconnect window).
+func (r *router) send(ctx context.Context, f proto.Frame) error {
+	conn := r.currentConn()
+	if conn == nil {
+		return errNoConn
+	}
+	return conn.Send(ctx, f)
+}
+
+// runReader dispatches every inner frame by its ReqID until the conn dies
+// or ctx cancels. Per-call frames (exec, read_file, write_file) and
+// per-stream frames (port_forward StreamAck/Data/Close) share the same
+// routing table since the daemon sets ReqID = streamID on stream frames.
+// Caller is expected to call replaceConn before re-invoking runReader on a
+// fresh conn (e.g., from the outer reconnect loop).
 func (r *router) runReader() {
+	conn := r.currentConn()
+	if conn == nil {
+		return
+	}
 	for {
-		f, err := r.conn.Recv(r.ctx)
+		f, err := conn.Recv(r.ctx)
 		if err != nil {
 			return
 		}
@@ -234,7 +276,7 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 
-	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -243,7 +285,10 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 		select {
 		case <-ctx.Done():
 			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+			}
 			switch f.Type {
 			case proto.FrameTypeExecChunk:
 				c, err := execproto.DecodeExecChunk(f.Payload)
@@ -320,7 +365,7 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 
-	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -329,7 +374,10 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		select {
 		case <-ctx.Done():
 			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+			}
 			switch f.Type {
 			case proto.FrameTypeFileChunk:
 				c, err := fileproto.DecodeFileChunk(f.Payload)
@@ -401,7 +449,7 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	reqJSON, _ := fileproto.FileWriteRequest{Path: args.Path, Mode: args.Mode}.Encode()
 	inner, _ := proto.Frame{Type: proto.FrameTypeFileWriteRequest, ReqID: reqID, Payload: reqJSON}.Encode()
 	signed := auth.SignFrame(r.apiKey, inner)
-	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -426,7 +474,10 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 		select {
 		case <-ctx.Done():
 			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+			}
 			switch f.Type {
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(f.Payload)
@@ -451,7 +502,7 @@ func (r *router) sendFileChunk(ctx context.Context, reqID string, c fileproto.Fi
 	payload, _ := c.Encode()
 	inner, _ := proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload}.Encode()
 	signed := auth.SignFrame(r.apiKey, inner)
-	return r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
+	return r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
 }
 
 type portForwardArgs struct {
@@ -514,7 +565,7 @@ func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host stri
 
 	openPayload, _ := streamproto.StreamOpen{StreamID: streamID, RemoteHost: host, RemotePort: port}.Encode()
 	openInner, _ := proto.Frame{Type: proto.FrameTypeStreamOpen, ReqID: streamID, Payload: openPayload}.Encode()
-	if err := r.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, openInner)}); err != nil {
+	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, openInner)}); err != nil {
 		return
 	}
 
@@ -524,7 +575,10 @@ func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host stri
 		select {
 		case <-ackCtx.Done():
 			return
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return
+			}
 			if f.Type == proto.FrameTypeStreamAck {
 				ack, _ := streamproto.DecodeStreamAck(f.Payload)
 				if !ack.Ok {
@@ -548,7 +602,7 @@ connected:
 				copy(data, buf[:n])
 				sdPayload, _ := streamproto.StreamData{StreamID: streamID, Data: data}.Encode()
 				sdInner, _ := proto.Frame{Type: proto.FrameTypeStreamData, ReqID: streamID, Payload: sdPayload}.Encode()
-				if serr := r.conn.Send(streamCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, sdInner)}); serr != nil {
+				if serr := r.send(streamCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, sdInner)}); serr != nil {
 					return
 				}
 			}
@@ -564,7 +618,10 @@ connected:
 			select {
 			case <-streamCtx.Done():
 				return
-			case f := <-ch:
+			case f, ok := <-ch:
+				if !ok {
+					return
+				}
 				switch f.Type {
 				case proto.FrameTypeStreamData:
 					sd, err := streamproto.DecodeStreamData(f.Payload)
@@ -585,7 +642,7 @@ connected:
 
 	closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
 	closeInner, _ := proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload}.Encode()
-	_ = r.conn.Send(context.Background(), proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, closeInner)})
+	_ = r.send(context.Background(), proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, closeInner)})
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {
