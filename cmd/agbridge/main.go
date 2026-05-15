@@ -12,7 +12,7 @@ func main() {
 		Use:   "agbridge",
 		Short: "AI agent remote operation surface over restrictive networks",
 	}
-	root.AddCommand(newBridgeCmd(), newGatewayCmd(), newDaemonCmd())
+	root.AddCommand(newBridgeCmd(), newGatewayCmd(), newDaemonCmd(), newCertCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
