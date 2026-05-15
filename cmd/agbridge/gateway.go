@@ -34,7 +34,10 @@ func newGatewayCmd() *cobra.Command {
 				return fmt.Errorf("load tls keypair: %w", err)
 			}
 			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
-			aud, err := audit.Open(cfg.AuditPath)
+			aud, err := audit.OpenWith(cfg.AuditPath, audit.Options{
+				MaxBytes:   cfg.AuditMaxBytes,
+				MaxBackups: cfg.AuditMaxBackups,
+			})
 			if err != nil {
 				return fmt.Errorf("open audit: %w", err)
 			}

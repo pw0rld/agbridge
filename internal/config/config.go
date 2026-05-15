@@ -11,10 +11,12 @@ import (
 
 // GatewayConfig drives "agbridge gateway".
 type GatewayConfig struct {
-	Listen    string        `yaml:"listen"`
-	AuditPath string        `yaml:"audit_path"`
-	Agents    []AgentEntry  `yaml:"agents"`
-	Daemons   []DaemonEntry `yaml:"daemons"`
+	Listen           string        `yaml:"listen"`
+	AuditPath        string        `yaml:"audit_path"`
+	AuditMaxBytes    int64         `yaml:"audit_max_bytes"`
+	AuditMaxBackups  int           `yaml:"audit_max_backups"`
+	Agents           []AgentEntry  `yaml:"agents"`
+	Daemons          []DaemonEntry `yaml:"daemons"`
 }
 
 // AgentEntry is one row under gateway.agents.
