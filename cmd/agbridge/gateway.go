@@ -41,11 +41,37 @@ func newGatewayCmd() *cobra.Command {
 			defer aud.Close()
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			addr, _, err := gateway.Run(ctx, tlsCfg, cfg, aud)
+			inst, err := gateway.Run(ctx, tlsCfg, cfg, aud)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "gateway listening on %s\n", addr)
+			fmt.Fprintf(os.Stderr, "gateway listening on %s\n", inst.Addr)
+
+			hupCh := make(chan os.Signal, 1)
+			signal.Notify(hupCh, syscall.SIGHUP)
+			defer signal.Stop(hupCh)
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-hupCh:
+						newCfg, err := config.LoadGateway(cfgPath)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "SIGHUP: reload failed: %v\n", err)
+							continue
+						}
+						inst.Creds.Replace(newCfg)
+						revoked := inst.Sessions.Revoke(inst.Creds)
+						if len(revoked) > 0 {
+							fmt.Fprintf(os.Stderr, "SIGHUP: reloaded; revoked %d sessions: %v\n", len(revoked), revoked)
+						} else {
+							fmt.Fprintln(os.Stderr, "SIGHUP: reloaded, no revocations")
+						}
+					}
+				}
+			}()
+
 			<-ctx.Done()
 			return nil
 		},

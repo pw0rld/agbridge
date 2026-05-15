@@ -26,15 +26,28 @@ type connIO interface {
 	Close() error
 }
 
-// Run starts the gateway. It returns the listener's actual address, plus
-// the CredRegistry so callers (main / tests) can Replace it on SIGHUP.
-func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (net.Addr, *CredRegistry, error) {
+// Instance bundles everything the caller (cmd/agbridge or tests) needs to
+// drive a running gateway: the listener address, the credential registry
+// (for hot reload via Replace), and the live-session table (for revoking
+// sessions whose creds were removed/rotated).
+type Instance struct {
+	Addr     net.Addr
+	Creds    *CredRegistry
+	Sessions *SessionTable
+}
+
+// Run starts the gateway and returns an Instance handle.
+func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (*Instance, error) {
 	ln, err := wss.Listen(ctx, cfg.Listen, tlsCfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	reg := NewRegistry()
-	creds := NewCredRegistry(cfg)
+	inst := &Instance{
+		Addr:     ln.Addr(),
+		Creds:    NewCredRegistry(cfg),
+		Sessions: NewSessionTable(),
+	}
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -48,13 +61,13 @@ func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud
 				}
 				return
 			}
-			go handleConn(ctx, c, creds, reg, aud)
+			go handleConn(ctx, c, inst, reg, aud)
 		}
 	}()
-	return ln.Addr(), creds, nil
+	return inst, nil
 }
 
-func handleConn(ctx context.Context, c connIO, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
+func handleConn(ctx context.Context, c connIO, inst *Instance, reg *Registry, aud *audit.Writer) {
 	defer c.Close()
 	hello, ok := readHello(ctx, c)
 	if !ok {
@@ -63,9 +76,9 @@ func handleConn(ctx context.Context, c connIO, creds *CredRegistry, reg *Registr
 	}
 	switch hello.Role {
 	case "daemon":
-		handleDaemon(ctx, c, hello, creds, reg, aud)
+		handleDaemon(ctx, c, hello, inst, reg, aud)
 	case "bridge":
-		handleBridge(ctx, c, hello, creds, reg, aud)
+		handleBridge(ctx, c, hello, inst, reg, aud)
 	default:
 		_ = c.Send(ctx, errFrame("unknown_role"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "reason": "unknown_role", "name": hello.Name})
@@ -84,8 +97,8 @@ func readHello(ctx context.Context, c connIO) (handshake.Hello, bool) {
 	return h, true
 }
 
-func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
-	entry, ok := creds.LookupDaemon(h.Name)
+func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instance, reg *Registry, aud *audit.Writer) {
+	entry, ok := inst.Creds.LookupDaemon(h.Name)
 	if !ok || !auth.SecretMatches(h.Secret, entry.TokenHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
@@ -97,15 +110,19 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, creds *CredR
 		return
 	}
 	defer reg.Unregister(h.Name)
+	_, release := inst.Sessions.Register(&Session{
+		Role: "daemon", Name: h.Name, KeyHash: entry.TokenHash, Conn: c,
+	})
+	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
-	// Phase 2: the daemon connection is read by bridgeRoutingLoop via the
-	// registry. We just block until shutdown.
+	// The daemon connection is read by handleBridge via the online-daemon
+	// registry; here we just block until shutdown (or revocation closes c).
 	<-ctx.Done()
 }
 
-func handleBridge(ctx context.Context, c connIO, h handshake.Hello, creds *CredRegistry, reg *Registry, aud *audit.Writer) {
-	entry, ok := creds.LookupAgent(h.Name)
+func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instance, reg *Registry, aud *audit.Writer) {
+	entry, ok := inst.Creds.LookupAgent(h.Name)
 	if !ok || !auth.SecretMatches(h.Secret, entry.APIKeyHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "bridge", "name": h.Name})
@@ -116,6 +133,10 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, creds *CredR
 		_ = aud.Append(map[string]any{"event": "authz_failed", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 		return
 	}
+	_, release := inst.Sessions.Register(&Session{
+		Role: "bridge", Name: h.Name, KeyHash: entry.APIKeyHash, Conn: c,
+	})
+	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 
