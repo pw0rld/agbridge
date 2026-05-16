@@ -2,8 +2,6 @@
 
 AI agent remote operation surface over restrictive networks (TLS:443 + MCP).
 
-See the [design spec](https://github.com/pw0rld/my-wiki/blob/main/wiki/ai-research/plan/agbridge.md) for goals.
-
 Status: Phase 5 — four MCP tools end-to-end plus production-grade
 resilience: bridge + daemon auto-reconnect with exponential backoff,
 WebSocket-layer keepalive, SIGHUP-driven credential reload with session
@@ -78,8 +76,7 @@ Both accept `--json` for machine-readable output.
 agbridge ships four MCP tools but they sit at very different points on the
 power-vs-risk axis. **Most deployments should use the Pure Tunnel mode**
 and treat the other tools as opt-in escape hatches for environments that
-can't run sshd. See the design rationale in
-[wiki/believe/agbridge-pure-tunnel-vs-rpc](https://github.com/pw0rld/my-wiki/blob/main/wiki/ai-research/believe/agbridge-pure-tunnel-vs-rpc.md).
+can't run sshd.
 
 ### Recommended: Pure Tunnel + sshd
 
