@@ -57,3 +57,25 @@ func (cr *CredRegistry) Replace(cfg *config.GatewayConfig) {
 	cr.daemons = daemons
 	cr.mu.Unlock()
 }
+
+// AddAgent inserts or replaces an agent entry. Used by the enroll
+// handler to make a freshly-onboarded bridge immediately effective
+// without requiring SIGHUP.
+func (cr *CredRegistry) AddAgent(a config.AgentEntry) {
+	cr.mu.Lock()
+	if cr.agents == nil {
+		cr.agents = map[string]config.AgentEntry{}
+	}
+	cr.agents[a.Name] = a
+	cr.mu.Unlock()
+}
+
+// AddDaemon inserts or replaces a daemon entry.
+func (cr *CredRegistry) AddDaemon(d config.DaemonEntry) {
+	cr.mu.Lock()
+	if cr.daemons == nil {
+		cr.daemons = map[string]config.DaemonEntry{}
+	}
+	cr.daemons[d.Name] = d
+	cr.mu.Unlock()
+}
