@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,6 +17,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
+	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
@@ -44,6 +48,13 @@ func newDaemonCmd() *cobra.Command {
 			if err := auth.AttachCertPin(tlsCfg, cfg.CertPin); err != nil {
 				return fmt.Errorf("cert pin: %w", err)
 			}
+
+			// Load Noise dependencies once (reused across reconnects).
+			deps, err := loadDaemonE2EDeps(cfg)
+			if err != nil {
+				return err
+			}
+
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
@@ -63,7 +74,7 @@ func newDaemonCmd() *cobra.Command {
 					return nil
 				}
 				fmt.Fprintln(os.Stderr, "daemon: handshake ok, awaiting Route frames")
-				runDaemonSession(ctx, conn, cfg)
+				runDaemonSession(ctx, conn, cfg, deps)
 				_ = conn.Close()
 				if ctx.Err() != nil {
 					return nil
@@ -102,6 +113,41 @@ func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCf
 	return conn, nil
 }
 
+// daemonE2EDeps is the cached E2E configuration shared across reconnects.
+// Nil when cfg.E2EMode == "disabled".
+type daemonE2EDeps struct {
+	noiseKey    *e2e.StaticKey
+	allowedPubs [][]byte
+	prologue    []byte
+	mode        string // "optional" | "required"
+}
+
+// loadDaemonE2EDeps validates and loads Noise key material + ACL once at
+// startup. Returns nil deps for e2e_mode="disabled".
+func loadDaemonE2EDeps(cfg *config.DaemonConfig) (*daemonE2EDeps, error) {
+	if cfg.E2EMode == "disabled" {
+		return nil, nil
+	}
+	sk, err := e2e.LoadStatic(cfg.NoiseStaticKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: load noise static key %q: %w", cfg.NoiseStaticKeyPath, err)
+	}
+	var pubs [][]byte
+	for i, b64 := range cfg.AllowedBridgePubkeys {
+		pub, err := e2e.PubFromBase64(b64)
+		if err != nil {
+			return nil, fmt.Errorf("daemon: allowed_bridge_pubkeys[%d]: %w", i, err)
+		}
+		pubs = append(pubs, pub)
+	}
+	return &daemonE2EDeps{
+		noiseKey:    sk,
+		allowedPubs: pubs,
+		prologue:    []byte(fmt.Sprintf("agbridge/v1|%s|%s", cfg.GatewayURL, cfg.DaemonName)),
+		mode:        cfg.E2EMode,
+	}, nil
+}
+
 // runDaemonSession dispatches Route frames on conn until Recv errors or the
 // parent ctx cancels. A per-session ctx is derived and cancelled before
 // return so in-flight tool goroutines (handleExec / handleWrite /
@@ -111,7 +157,7 @@ func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCf
 // watchdog goroutine that closes the conn when sessionCtx cancels —
 // otherwise SIGTERM would leave the daemon parked in Recv until the next
 // frame arrived.
-func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.DaemonConfig) {
+func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.DaemonConfig, deps *daemonE2EDeps) {
 	sessionCtx, cancel := context.WithCancel(parent)
 	defer cancel()
 	go func() {
@@ -121,6 +167,7 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 	state := &daemonState{
 		cfg:     cfg,
 		conn:    conn,
+		e2e:     deps,
 		writes:  make(map[string]*writeSlot),
 		streams: make(map[string]*streamSlot),
 	}
@@ -129,14 +176,23 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		if err != nil {
 			return
 		}
-		if f.Type != proto.FrameTypeRoute {
+		switch f.Type {
+		case proto.FrameTypeNoiseInit:
+			state.handleNoiseInit(sessionCtx, f)
 			continue
+		case proto.FrameTypeRoute:
+			innerBytes, err := state.unwrapRoute(f.Payload)
+			if err != nil {
+				continue
+			}
+			inner, err := proto.Decode(innerBytes)
+			if err != nil {
+				continue
+			}
+			state.dispatch(sessionCtx, inner)
+		default:
+			// ignore stray frames
 		}
-		inner, err := proto.Decode(f.Payload)
-		if err != nil {
-			continue
-		}
-		state.dispatch(sessionCtx, inner)
 	}
 }
 
@@ -152,9 +208,16 @@ type streamSlot struct {
 type daemonState struct {
 	cfg     *config.DaemonConfig
 	conn    *wss.Conn
+	e2e     *daemonE2EDeps // nil when e2e_mode == "disabled"
 	mu      sync.Mutex
 	writes  map[string]*writeSlot
 	streams map[string]*streamSlot
+
+	// Active E2E session. v0.1.0 single-active-session per daemon conn
+	// (v0.0.8 will demux per-bridge by session_id when multi-bridge lands).
+	sessionMu sync.Mutex
+	session   *e2e.Session
+	sessionID [8]byte
 }
 
 func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
@@ -189,7 +252,116 @@ func (s *daemonState) sendInner(ctx context.Context, inner proto.Frame) {
 	if err != nil {
 		return
 	}
-	_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: encoded})
+	s.sessionMu.Lock()
+	sess := s.session
+	sid := s.sessionID
+	s.sessionMu.Unlock()
+
+	var payload []byte
+	if sess != nil {
+		ct, err := sess.Encrypt(sid[:], encoded)
+		if err != nil {
+			return
+		}
+		payload = make([]byte, 8+len(ct))
+		copy(payload, sid[:])
+		copy(payload[8:], ct)
+	} else {
+		payload = encoded
+	}
+	_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: payload})
+}
+
+// unwrapRoute extracts the inner frame bytes from a Route payload. If a
+// session is active the payload is AEAD-decrypted (after stripping the
+// 8-byte session_id prefix). When e2e_mode == "required" and no session
+// exists, plaintext Route is rejected outright.
+func (s *daemonState) unwrapRoute(payload []byte) ([]byte, error) {
+	s.sessionMu.Lock()
+	sess := s.session
+	sid := s.sessionID
+	s.sessionMu.Unlock()
+
+	if sess == nil {
+		if s.e2e != nil && s.e2e.mode == "required" {
+			return nil, errors.New("plaintext Route refused under e2e_mode=required")
+		}
+		return payload, nil
+	}
+	if len(payload) < 8 {
+		return nil, errors.New("route payload too short for sid")
+	}
+	var got [8]byte
+	copy(got[:], payload[:8])
+	if got != sid {
+		return nil, errors.New("route sid mismatch")
+	}
+	plain, err := sess.Decrypt(sid[:], payload[8:])
+	if err != nil {
+		return nil, fmt.Errorf("aead decrypt: %w", err)
+	}
+	return plain, nil
+}
+
+// handleNoiseInit runs the responder side of Noise IK. On success it
+// installs the resulting Session for subsequent Route frames. On any
+// failure it returns an opaque "handshake_failed" Error frame (detailed
+// reason is logged locally only to avoid leaking ACL info).
+func (s *daemonState) handleNoiseInit(ctx context.Context, f proto.Frame) {
+	if s.e2e == nil {
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("e2e_disabled")})
+		return
+	}
+	sidBytes, err := hex.DecodeString(f.ReqID)
+	if err != nil || len(sidBytes) != 8 {
+		fmt.Fprintf(os.Stderr, "daemon: NoiseInit bad sid: %v\n", err)
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("handshake_failed")})
+		return
+	}
+	resp, err := e2e.NewResponder(s.e2e.noiseKey, s.e2e.prologue)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: NewResponder: %v\n", err)
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("handshake_failed")})
+		return
+	}
+	peer, err := resp.ReadMessage1(f.Payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: NoiseInit ReadMessage1: %v\n", err)
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("handshake_failed")})
+		return
+	}
+	if !s.peerAllowed(peer) {
+		fmt.Fprintf(os.Stderr, "daemon: NoiseInit peer not in allowlist\n")
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("handshake_failed")})
+		return
+	}
+	msg2, sess, err := resp.WriteMessage2()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: WriteMessage2: %v\n", err)
+		_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: f.ReqID, Payload: []byte("handshake_failed")})
+		return
+	}
+	var sid [8]byte
+	copy(sid[:], sidBytes)
+
+	s.sessionMu.Lock()
+	s.session = sess
+	s.sessionID = sid
+	s.sessionMu.Unlock()
+
+	_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeNoiseResp, ReqID: f.ReqID, Payload: msg2})
+}
+
+func (s *daemonState) peerAllowed(peer []byte) bool {
+	if s.e2e == nil {
+		return false
+	}
+	for _, a := range s.e2e.allowedPubs {
+		if bytes.Equal(a, peer) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *daemonState) handleExec(ctx context.Context, inner proto.Frame) {
