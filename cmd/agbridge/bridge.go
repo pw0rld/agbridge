@@ -30,9 +30,12 @@ import (
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
+	"github.com/pw0rld/agbridge/internal/state"
 	"github.com/pw0rld/agbridge/internal/streamproto"
 	"github.com/pw0rld/agbridge/internal/transport"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
+
+	"path/filepath"
 )
 
 const maxBufferedOutput = 10 << 20
@@ -40,12 +43,12 @@ const maxBufferedOutput = 10 << 20
 var errNoConn = errors.New("bridge: no active connection")
 
 func newBridgeCmd() *cobra.Command {
-	var cfgPath string
+	var cfgPath, stateDir string
 	cmd := &cobra.Command{
 		Use:   "bridge",
 		Short: "Run the local MCP bridge",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.LoadBridge(cfgPath)
+			cfg, err := loadBridgeConfig(cfgPath, stateDir)
 			if err != nil {
 				return err
 			}
@@ -152,9 +155,48 @@ func newBridgeCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&cfgPath, "config", "", "path to bridge YAML config")
-	_ = cmd.MarkFlagRequired("config")
+	cmd.Flags().StringVar(&cfgPath, "config", "", "path to bridge YAML config (legacy)")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "directory containing state.json + bridge_noise.key (default ~/.config/agbridge/)")
 	return cmd
+}
+
+// loadBridgeConfig prefers stateDir/state.json when present; otherwise
+// falls back to legacy --config YAML. Returns an error when neither
+// is provided or both fail to load.
+func loadBridgeConfig(cfgPath, stateDir string) (*config.BridgeConfig, error) {
+	if stateDir != "" {
+		statePath := filepath.Join(stateDir, "state.json")
+		st, err := state.LoadBridge(statePath)
+		if err != nil {
+			return nil, fmt.Errorf("load %s: %w", statePath, err)
+		}
+		if err := st.Validate(); err != nil {
+			return nil, err
+		}
+		return bridgeConfigFromState(st), nil
+	}
+	if cfgPath == "" {
+		return nil, fmt.Errorf("bridge: either --state-dir or --config is required")
+	}
+	return config.LoadBridge(cfgPath)
+}
+
+// bridgeConfigFromState builds a config.BridgeConfig from the new state schema
+// so the rest of bridge.go can stay unchanged.
+func bridgeConfigFromState(s *state.BridgeState) *config.BridgeConfig {
+	cfg := &config.BridgeConfig{
+		GatewayURL:          s.Gateway.URL,
+		AgentName:           s.AgentName,
+		APIKey:              s.APIKey,
+		CertPin:             s.Gateway.CertPin,
+		TargetDaemon:        s.DefaultTarget,
+		E2EMode:             s.E2EMode,
+		BridgeStaticKeyPath: s.BridgeStaticKeyPath,
+	}
+	if dr, ok := s.KnownDaemons[s.DefaultTarget]; ok {
+		cfg.DaemonPubkey = dr.Pubkey
+	}
+	return cfg
 }
 
 type router struct {

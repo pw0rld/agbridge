@@ -89,6 +89,15 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 	apiHash := "sha256:" + auth.SHA256Hex([]byte(apiKey))
 	devID := "d_" + randHex(16)
 
+	// Default e2e_mode:
+	//   bridge → required  (bridge has a specific target daemon pinned;
+	//                       gateway returns daemon pub, so handshake works)
+	//   daemon → optional  (no bridge pubkey known yet at first enroll;
+	//                       operator opts into "required" via Policy.Strict)
+	defaultE2E := "required"
+	if tok.Role == "daemon" && (tok.Policy == nil || !tok.Policy.Strict) {
+		defaultE2E = "optional"
+	}
 	resp := EnrollResponse{
 		DeviceID:   devID,
 		Name:       tok.Name,
@@ -96,7 +105,7 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		APIKeyHash: apiHash,
 		GatewayURL: s.GatewayURL,
 		CertPin:    s.CertPinSource(),
-		E2EMode:    "required",
+		E2EMode:    defaultE2E,
 	}
 
 	s.mu.Lock()

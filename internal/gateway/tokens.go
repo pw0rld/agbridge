@@ -35,6 +35,12 @@ type DaemonPolicy struct {
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`
+	// Strict, when true, forces the daemon into e2e_mode=required and
+	// rejects bridges whose pubkey isn't in AllowedBridgePubkeys.
+	// Default (false) → e2e_mode=optional (Noise IK still negotiated,
+	// but with an empty allowlist any bridge under the same tenant is
+	// accepted — operator can later tighten via re-enroll).
+	Strict bool `json:"strict,omitempty"`
 }
 
 // TokenRequest is the input to Issue().
@@ -94,6 +100,9 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 		ExpiresAt: time.Now().Add(req.TTL),
 	}
 	s.mu.Lock()
+	// Pull in any tokens issued by a sibling process (e.g. CLI vs running
+	// gateway). The single tokens.json file is the source of truth.
+	_ = s.reloadLocked()
 	s.toks[tok.Token] = tok
 	err := s.flushLocked()
 	s.mu.Unlock()
@@ -108,6 +117,10 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 func (s *TokenStore) Consume(t string) (*Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Tokens may have been issued by a sibling process (the CLI
+	// `agbridge issue-token`) after we loaded the store; refresh
+	// from disk before lookup so we don't 401 a valid token.
+	_ = s.reloadLocked()
 	tok, ok := s.toks[t]
 	if !ok {
 		return nil, errors.New("tokens: not found")
@@ -125,6 +138,27 @@ func (s *TokenStore) Consume(t string) (*Token, error) {
 	}
 	out := *tok
 	return &out, nil
+}
+
+// reloadLocked re-reads tokens.json into s.toks. Callers must hold s.mu.
+// Errors are non-fatal (the in-memory state is preserved).
+func (s *TokenStore) reloadLocked() error {
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	fresh := map[string]*Token{}
+	if err := json.Unmarshal(b, &fresh); err != nil {
+		return err
+	}
+	s.toks = fresh
+	return nil
 }
 
 // GC removes used + expired tokens older than retention.
