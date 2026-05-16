@@ -56,6 +56,22 @@ func newBridgeCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
+			rt, err := newRouter(ctx, nil, []byte(cfg.APIKey), cfg)
+			if err != nil {
+				return err
+			}
+
+			// First connect synchronously so we never serve MCP before an
+			// initial handshake succeeds — otherwise the very first tool call
+			// would observe network_lost. If handshake fails we return the
+			// error from RunE; main() exits non-zero. Installing the
+			// signal-driven os.Exit goroutine BEFORE this point would race
+			// with the deferred cancel() and force exit 0, masking failures.
+			if err := bridgeDialAndAttach(ctx, rt, cfg, tlsCfg); err != nil {
+				return fmt.Errorf("initial handshake: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "bridge: handshake ok, starting MCP stdio server")
+
 			// On SIGTERM/SIGINT, exit immediately. os.Stdin.Close() does not
 			// reliably wake bufio.Scanner's blocked Read on Linux (stdin is
 			// not in pollable mode), so a soft shutdown is impractical.
@@ -66,19 +82,6 @@ func newBridgeCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "bridge: shutdown signal received")
 				os.Exit(0)
 			}()
-
-			rt, err := newRouter(ctx, nil, []byte(cfg.APIKey), cfg)
-			if err != nil {
-				return err
-			}
-
-			// First connect synchronously so we never serve MCP before an
-			// initial handshake succeeds — otherwise the very first tool call
-			// would observe network_lost.
-			if err := bridgeDialAndAttach(ctx, rt, cfg, tlsCfg); err != nil {
-				return fmt.Errorf("initial handshake: %w", err)
-			}
-			fmt.Fprintln(os.Stderr, "bridge: handshake ok, starting MCP stdio server")
 
 			go superviseBridgeConn(ctx, rt, cfg, tlsCfg)
 
