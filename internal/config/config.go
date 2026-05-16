@@ -39,6 +39,11 @@ type BridgeConfig struct {
 	APIKey       string `yaml:"api_key"`
 	CertPin      string `yaml:"cert_pin"`
 	TargetDaemon string `yaml:"target_daemon"`
+
+	// E2E (v0.1.0+). Default "disabled" preserves pre-v0.1.0 behavior.
+	E2EMode             string `yaml:"e2e_mode"`               // "disabled" | "optional" | "required"
+	BridgeStaticKeyPath string `yaml:"bridge_static_key_path"` // path to X25519 priv (32B)
+	DaemonPubkey        string `yaml:"daemon_pubkey"`          // base64 X25519 pub of target daemon
 }
 
 // DaemonConfig drives "agbridge daemon".
@@ -52,6 +57,11 @@ type DaemonConfig struct {
 	AllowedReadPaths  []string `yaml:"allowed_read_paths"`
 	AllowedWritePaths []string `yaml:"allowed_write_paths"`
 	ForbiddenPorts    []int    `yaml:"forbidden_ports"`
+
+	// E2E (v0.1.0+).
+	E2EMode              string   `yaml:"e2e_mode"`               // "disabled" | "optional" | "required"
+	NoiseStaticKeyPath   string   `yaml:"noise_static_key_path"`  // path to X25519 priv (32B)
+	AllowedBridgePubkeys []string `yaml:"allowed_bridge_pubkeys"` // base64 X25519 pubs; required if e2e_mode=required
 }
 
 // LoadGateway parses a gateway YAML config from path and validates it.
@@ -78,6 +88,9 @@ func LoadBridge(path string) (*BridgeConfig, error) {
 	if cfg.GatewayURL == "" || cfg.AgentName == "" || cfg.APIKey == "" || cfg.TargetDaemon == "" {
 		return nil, errors.New("config: gateway_url, agent_name, api_key, target_daemon all required")
 	}
+	if err := normalizeBridgeE2E(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -90,7 +103,52 @@ func LoadDaemon(path string) (*DaemonConfig, error) {
 	if cfg.GatewayURL == "" || cfg.DaemonName == "" || cfg.RegistrationToken == "" {
 		return nil, errors.New("config: gateway_url, daemon_name, registration_token all required")
 	}
+	if err := normalizeDaemonE2E(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+func normalizeBridgeE2E(cfg *BridgeConfig) error {
+	switch cfg.E2EMode {
+	case "":
+		cfg.E2EMode = "disabled"
+	case "disabled", "optional", "required":
+		// ok
+	default:
+		return fmt.Errorf("config: invalid e2e_mode %q (want disabled|optional|required)", cfg.E2EMode)
+	}
+	if cfg.E2EMode == "disabled" {
+		return nil
+	}
+	if cfg.BridgeStaticKeyPath == "" {
+		return fmt.Errorf("config: bridge_static_key_path required when e2e_mode=%s", cfg.E2EMode)
+	}
+	if cfg.DaemonPubkey == "" {
+		return fmt.Errorf("config: daemon_pubkey required when e2e_mode=%s", cfg.E2EMode)
+	}
+	return nil
+}
+
+func normalizeDaemonE2E(cfg *DaemonConfig) error {
+	switch cfg.E2EMode {
+	case "":
+		cfg.E2EMode = "disabled"
+	case "disabled", "optional", "required":
+		// ok
+	default:
+		return fmt.Errorf("config: invalid e2e_mode %q (want disabled|optional|required)", cfg.E2EMode)
+	}
+	if cfg.E2EMode == "disabled" {
+		return nil
+	}
+	if cfg.NoiseStaticKeyPath == "" {
+		return fmt.Errorf("config: noise_static_key_path required when e2e_mode=%s", cfg.E2EMode)
+	}
+	if cfg.E2EMode == "required" && len(cfg.AllowedBridgePubkeys) == 0 {
+		return errors.New("config: allowed_bridge_pubkeys must be non-empty when e2e_mode=required (refusing to start with empty allowlist)")
+	}
+	return nil
 }
 
 func loadYAML(path string, out any) error {

@@ -4,10 +4,21 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/pw0rld/agbridge/internal/config"
 )
 
+func newRouterForTest(t *testing.T) *router {
+	t.Helper()
+	r, err := newRouter(context.Background(), nil, []byte("k"), &config.BridgeConfig{E2EMode: "disabled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestRouterReplaceConnClosesPending(t *testing.T) {
-	r := newRouter(context.Background(), nil, []byte("k"))
+	r := newRouterForTest(t)
 	ch1 := r.registerCall("req1")
 	ch2 := r.registerCall("req2")
 	r.replaceConn(nil)
@@ -30,7 +41,7 @@ func TestRouterReplaceConnClosesPending(t *testing.T) {
 }
 
 func TestRouterReplaceConnSwapsActiveConn(t *testing.T) {
-	r := newRouter(context.Background(), nil, []byte("k"))
+	r := newRouterForTest(t)
 	if got := r.currentConn(); got != nil {
 		t.Fatalf("expected nil initial conn, got %v", got)
 	}

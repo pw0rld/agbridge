@@ -23,6 +23,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
+	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -66,7 +67,10 @@ func newBridgeCmd() *cobra.Command {
 				os.Exit(0)
 			}()
 
-			rt := newRouter(ctx, nil, []byte(cfg.APIKey))
+			rt, err := newRouter(ctx, nil, []byte(cfg.APIKey), cfg)
+			if err != nil {
+				return err
+			}
 
 			// First connect synchronously so we never serve MCP before an
 			// initial handshake succeeds — otherwise the very first tool call
@@ -151,20 +155,41 @@ func newBridgeCmd() *cobra.Command {
 }
 
 type router struct {
-	ctx     context.Context
-	apiKey  []byte
-	mu      sync.Mutex
-	conn    *wss.Conn
-	pending map[string]chan proto.Frame
+	ctx       context.Context
+	apiKey    []byte
+	e2eMode   string         // "disabled" | "optional" | "required"
+	bridgeKey *e2e.StaticKey // nil when e2e_mode == "disabled"
+	daemonPub []byte         // nil when e2e_mode == "disabled"
+	prologue  []byte         // cached IK prologue derived from gateway URL + target
+	mu        sync.Mutex
+	conn      *wss.Conn
+	session   *e2e.Session // active E2E session (nil before handshake / after disconnect)
+	sessionID [8]byte      // bound to session
+	pending   map[string]chan proto.Frame
 }
 
-func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte) *router {
-	return &router{
+func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte, cfg *config.BridgeConfig) (*router, error) {
+	r := &router{
 		ctx:     ctx,
 		conn:    conn,
 		apiKey:  apiKey,
+		e2eMode: cfg.E2EMode,
 		pending: make(map[string]chan proto.Frame),
 	}
+	if cfg.E2EMode != "disabled" {
+		sk, err := e2e.LoadStatic(cfg.BridgeStaticKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("bridge: load static key %q: %w", cfg.BridgeStaticKeyPath, err)
+		}
+		pub, err := e2e.PubFromBase64(cfg.DaemonPubkey)
+		if err != nil {
+			return nil, fmt.Errorf("bridge: parse daemon_pubkey: %w", err)
+		}
+		r.bridgeKey = sk
+		r.daemonPub = pub
+		r.prologue = []byte(fmt.Sprintf("agbridge/v1|%s|%s", cfg.GatewayURL, cfg.TargetDaemon))
+	}
+	return r, nil
 }
 
 // currentConn returns the live wss.Conn under lock. Callers should treat the
@@ -178,16 +203,125 @@ func (r *router) currentConn() *wss.Conn {
 
 // replaceConn swaps in newConn and closes every pending call channel so the
 // in-flight handler returns network_lost. Caller is the outer reconnect
-// loop; replaceConn(nil) is a clean shutdown signal.
+// loop; replaceConn(nil) clears the E2E session as well (a fresh handshake
+// is performed on the next connect, preserving forward secrecy).
 func (r *router) replaceConn(newConn *wss.Conn) {
 	r.mu.Lock()
 	old := r.pending
 	r.pending = make(map[string]chan proto.Frame)
 	r.conn = newConn
+	// On disconnect, throw away E2E session keys (forward secrecy).
+	r.session = nil
+	r.sessionID = [8]byte{}
 	r.mu.Unlock()
 	for _, ch := range old {
 		close(ch)
 	}
+}
+
+// installSession attaches an E2E session to the current connection.
+// Called from bridgeDialAndAttach after successful Noise handshake.
+func (r *router) installSession(s *e2e.Session, sid [8]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.session = s
+	r.sessionID = sid
+}
+
+// sendInner wraps inner as a Route frame and writes to the gateway.
+// If an E2E session is active, the inner frame is AEAD-encrypted with
+// AD = sessionID before HMAC signing. session_id is prepended to payload
+// so the daemon can demultiplex its session map.
+func (r *router) sendInner(ctx context.Context, inner proto.Frame) error {
+	innerBytes, err := inner.Encode()
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	sess := r.session
+	sid := r.sessionID
+	r.mu.Unlock()
+
+	var routePayload []byte
+	if sess != nil {
+		ct, err := sess.Encrypt(sid[:], innerBytes)
+		if err != nil {
+			return fmt.Errorf("e2e encrypt: %w", err)
+		}
+		routePayload = make([]byte, 8+len(ct))
+		copy(routePayload, sid[:])
+		copy(routePayload[8:], ct)
+	} else {
+		routePayload = innerBytes
+	}
+	signed := auth.SignFrame(r.apiKey, routePayload)
+	return r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
+}
+
+// decodeInbound parses a Route frame's payload, unwrapping AEAD when a
+// session is active. Returns the inner Frame.
+func (r *router) decodeInbound(payload []byte) (proto.Frame, error) {
+	r.mu.Lock()
+	sess := r.session
+	sid := r.sessionID
+	r.mu.Unlock()
+
+	if sess == nil {
+		return proto.Decode(payload)
+	}
+	if len(payload) < 8 {
+		return proto.Frame{}, errors.New("route payload too short for sid")
+	}
+	var got [8]byte
+	copy(got[:], payload[:8])
+	if got != sid {
+		return proto.Frame{}, errors.New("route sid mismatch")
+	}
+	plain, err := sess.Decrypt(sid[:], payload[8:])
+	if err != nil {
+		return proto.Frame{}, fmt.Errorf("e2e decrypt: %w", err)
+	}
+	return proto.Decode(plain)
+}
+
+// doBridgeNoiseHandshake runs the Noise IK handshake over the freshly
+// authenticated WSS connection, returning the session and its 8-byte ID.
+// Called by bridgeDialAndAttach when e2e is enabled.
+func doBridgeNoiseHandshake(ctx context.Context, conn *wss.Conn, rt *router) (*e2e.Session, [8]byte, error) {
+	var sid [8]byte
+	if _, err := rand.Read(sid[:]); err != nil {
+		return nil, sid, fmt.Errorf("sid rand: %w", err)
+	}
+	init, err := e2e.NewInitiator(rt.bridgeKey, rt.daemonPub, rt.prologue)
+	if err != nil {
+		return nil, sid, err
+	}
+	msg1, err := init.WriteMessage1()
+	if err != nil {
+		return nil, sid, err
+	}
+	if err := conn.Send(ctx, proto.Frame{
+		Type:    proto.FrameTypeNoiseInit,
+		ReqID:   hex.EncodeToString(sid[:]),
+		Payload: msg1,
+	}); err != nil {
+		return nil, sid, err
+	}
+	resp, err := conn.Recv(ctx)
+	if err != nil {
+		return nil, sid, err
+	}
+	if resp.Type == proto.FrameTypeError {
+		return nil, sid, fmt.Errorf("daemon rejected handshake: %s", string(resp.Payload))
+	}
+	if resp.Type != proto.FrameTypeNoiseResp {
+		return nil, sid, fmt.Errorf("expected NoiseResp, got type %d", resp.Type)
+	}
+	sess, err := init.ReadMessage2(resp.Payload)
+	if err != nil {
+		return nil, sid, err
+	}
+	return sess, sid, nil
 }
 
 // send writes f via the current conn. Returns errNoConn if there's no live
@@ -200,9 +334,9 @@ func (r *router) send(ctx context.Context, f proto.Frame) error {
 	return conn.Send(ctx, f)
 }
 
-// bridgeDialAndAttach dials the gateway, runs the bridge handshake, and
-// hands the live conn to rt via replaceConn. On any handshake failure it
-// closes the new conn and returns the error.
+// bridgeDialAndAttach dials the gateway, runs the bridge handshake (Hello
+// then optional Noise IK), and hands the live conn to rt via replaceConn.
+// On any failure it closes the new conn and returns the error.
 func bridgeDialAndAttach(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) error {
 	conn, err := wss.Dial(ctx, cfg.GatewayURL, transport.Credentials{}, tlsCfg)
 	if err != nil {
@@ -223,7 +357,24 @@ func bridgeDialAndAttach(ctx context.Context, rt *router, cfg *config.BridgeConf
 		_ = conn.Close()
 		return fmt.Errorf("handshake nack: %v", ack.Type)
 	}
+
+	// Optional Noise IK handshake. Must happen BEFORE replaceConn so that
+	// in-flight Route frames are never sent through a conn whose session is
+	// half-initialized.
+	var sess *e2e.Session
+	var sid [8]byte
+	if rt.e2eMode != "disabled" {
+		sess, sid, err = doBridgeNoiseHandshake(ctx, conn, rt)
+		if err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("noise handshake: %w", err)
+		}
+	}
+
 	rt.replaceConn(conn)
+	if sess != nil {
+		rt.installSession(sess, sid)
+	}
 	return nil
 }
 
@@ -267,7 +418,7 @@ func (r *router) runReader() {
 		if f.Type != proto.FrameTypeRoute {
 			continue
 		}
-		inner, err := proto.Decode(f.Payload)
+		inner, err := r.decodeInbound(f.Payload)
 		if err != nil {
 			continue
 		}
@@ -327,16 +478,11 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 	if err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 	}
-	inner, err := proto.Frame{Type: proto.FrameTypeExecRequest, ReqID: reqID, Payload: reqJSON}.Encode()
-	if err != nil {
-		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
-	}
-	signed := auth.SignFrame(r.apiKey, inner)
 
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 
-	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeExecRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -419,13 +565,11 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 	}
 	reqID := newReqID()
 	reqJSON, _ := fileproto.FileReadRequest{Path: args.Path, MaxSize: args.MaxSize}.Encode()
-	inner, _ := proto.Frame{Type: proto.FrameTypeFileReadRequest, ReqID: reqID, Payload: reqJSON}.Encode()
-	signed := auth.SignFrame(r.apiKey, inner)
 
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 
-	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileReadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -507,9 +651,7 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	defer r.unregisterCall(reqID)
 
 	reqJSON, _ := fileproto.FileWriteRequest{Path: args.Path, Mode: args.Mode}.Encode()
-	inner, _ := proto.Frame{Type: proto.FrameTypeFileWriteRequest, ReqID: reqID, Payload: reqJSON}.Encode()
-	signed := auth.SignFrame(r.apiKey, inner)
-	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileWriteRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
@@ -560,9 +702,7 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 
 func (r *router) sendFileChunk(ctx context.Context, reqID string, c fileproto.FileChunk) error {
 	payload, _ := c.Encode()
-	inner, _ := proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload}.Encode()
-	signed := auth.SignFrame(r.apiKey, inner)
-	return r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed})
+	return r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload})
 }
 
 type portForwardArgs struct {
@@ -624,8 +764,7 @@ func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host stri
 	defer r.unregisterStream(streamID)
 
 	openPayload, _ := streamproto.StreamOpen{StreamID: streamID, RemoteHost: host, RemotePort: port}.Encode()
-	openInner, _ := proto.Frame{Type: proto.FrameTypeStreamOpen, ReqID: streamID, Payload: openPayload}.Encode()
-	if err := r.send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, openInner)}); err != nil {
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStreamOpen, ReqID: streamID, Payload: openPayload}); err != nil {
 		return
 	}
 
@@ -661,8 +800,7 @@ connected:
 				data := make([]byte, n)
 				copy(data, buf[:n])
 				sdPayload, _ := streamproto.StreamData{StreamID: streamID, Data: data}.Encode()
-				sdInner, _ := proto.Frame{Type: proto.FrameTypeStreamData, ReqID: streamID, Payload: sdPayload}.Encode()
-				if serr := r.send(streamCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, sdInner)}); serr != nil {
+				if serr := r.sendInner(streamCtx, proto.Frame{Type: proto.FrameTypeStreamData, ReqID: streamID, Payload: sdPayload}); serr != nil {
 					return
 				}
 			}
@@ -701,8 +839,7 @@ connected:
 	<-streamCtx.Done()
 
 	closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
-	closeInner, _ := proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload}.Encode()
-	_ = r.send(context.Background(), proto.Frame{Type: proto.FrameTypeRoute, Payload: auth.SignFrame(r.apiKey, closeInner)})
+	_ = r.sendInner(context.Background(), proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload})
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {

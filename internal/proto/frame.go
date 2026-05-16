@@ -46,6 +46,11 @@ const (
 	FrameTypeStreamAck   FrameType = 41
 	FrameTypeStreamData  FrameType = 42
 	FrameTypeStreamClose FrameType = 43
+
+	// E2E handshake (v0.1.0+). Gateway forwards as opaque; only peers parse.
+	FrameTypeNoiseInit  FrameType = 50
+	FrameTypeNoiseResp  FrameType = 51
+	FrameTypeNoiseRekey FrameType = 52
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific
