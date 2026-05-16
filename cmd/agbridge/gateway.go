@@ -65,16 +65,13 @@ func newGatewayCmd() *cobra.Command {
 			defer cancel()
 
 			// Wire enrollment endpoint on /v1/enroll (shared 443 TLS server).
-			cfgDir := filepath.Dir(cfgPath)
-			tokensPath := filepath.Join(cfgDir, "tokens.json")
-			gwStatePath := filepath.Join(cfgDir, "gateway-state.json")
+			tokensPath := gatewayTokensPath(cfgPath)
+			gwStatePath := gatewayStatePath(cfgPath)
 			tokenStore, err := gateway.NewTokenStore(tokensPath)
 			if err != nil {
 				return fmt.Errorf("token store: %w", err)
 			}
 			gwState := hydrateGatewayState(cfg, tokensPath)
-			// If a prior gateway-state.json exists, merge its entries
-			// (devices enrolled in previous runs).
 			if prior, err := state.LoadGateway(gwStatePath); err == nil {
 				mergeGatewayState(gwState, prior, cfg)
 			}
@@ -116,6 +113,12 @@ func newGatewayCmd() *cobra.Command {
 							fmt.Fprintf(os.Stderr, "SIGHUP: reload failed: %v\n", err)
 							continue
 						}
+						// Re-merge gateway-state.json so enrolled devices
+						// don't disappear from CredRegistry across reload.
+						freshState := hydrateGatewayState(newCfg, tokensPath)
+						if prior, err := state.LoadGateway(gwStatePath); err == nil {
+							mergeGatewayState(freshState, prior, newCfg)
+						}
 						inst.Creds.Replace(newCfg)
 						revoked := inst.Sessions.Revoke(inst.Creds)
 						if len(revoked) > 0 {
@@ -138,6 +141,16 @@ func newGatewayCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("cert")
 	_ = cmd.MarkFlagRequired("key")
 	return cmd
+}
+
+// gatewayTokensPath returns the tokens.json path co-located with gateway.yaml.
+func gatewayTokensPath(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), "tokens.json")
+}
+
+// gatewayStatePath returns the gateway-state.json path co-located with gateway.yaml.
+func gatewayStatePath(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), "gateway-state.json")
 }
 
 // computeCertPin returns sha256:<hex> over the first cert in the PEM bundle.
