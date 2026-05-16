@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/execproto"
@@ -45,6 +46,22 @@ func Exec(ctx context.Context, req execproto.ExecRequest, allowedCwds, envAllowl
 	cmd := exec.CommandContext(cctx, req.Cmd, req.Args...)
 	cmd.Dir = req.Cwd
 	cmd.Env = buildEnv(envAllowlist, req.Env)
+	// Put the subprocess in its own process group so we can SIGKILL the
+	// entire tree on timeout. Default exec.CommandContext only kills the
+	// main PID; children (e.g., `sh -c "sleep 5"` spawns `sleep` as a
+	// child) survive and keep stdout/stderr pipes open, deadlocking
+	// wg.Wait below.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		// Negative PID targets the process group.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Belt and suspenders: if the children still hold pipes open after
+	// Cancel, force-close them after this delay so Wait can return.
+	cmd.WaitDelay = 500 * time.Millisecond
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
