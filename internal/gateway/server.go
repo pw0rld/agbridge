@@ -174,19 +174,31 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		if err != nil {
 			return
 		}
-		if f.Type != proto.FrameTypeRoute {
-			continue
-		}
-		inner, err := auth.VerifyFrame(apiKey, f.Payload)
-		if err != nil {
-			_ = c.Send(bridgeCtx, errFrame("bad_mac"))
-			_ = aud.Append(map[string]any{"event": "mac_failed", "agent": h.Name, "target": h.TargetDaemon})
-			return
-		}
-		_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon})
-		if err := proxy.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
-			_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
-			return
+		switch f.Type {
+		case proto.FrameTypeRoute:
+			inner, err := auth.VerifyFrame(apiKey, f.Payload)
+			if err != nil {
+				_ = c.Send(bridgeCtx, errFrame("bad_mac"))
+				_ = aud.Append(map[string]any{"event": "mac_failed", "agent": h.Name, "target": h.TargetDaemon})
+				return
+			}
+			_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon})
+			if err := proxy.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
+				_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
+				return
+			}
+		case proto.FrameTypeNoiseInit, proto.FrameTypeNoiseRekey:
+			// Noise handshake / rekey frames: forward opaquely. Integrity
+			// and authenticity are enforced by Noise itself (msg1 carries
+			// Poly1305 tags, peer pub revealed for ACL on the daemon
+			// side). Gateway only relays bytes and audits the event.
+			_ = aud.Append(map[string]any{"event": "noise_relay", "agent": h.Name, "target": h.TargetDaemon, "frame_type": f.Type})
+			if err := proxy.Send(bridgeCtx, f); err != nil {
+				_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
+				return
+			}
+		default:
+			// ignore stray frames silently
 		}
 	}
 }

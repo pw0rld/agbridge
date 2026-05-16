@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/e2e"
 )
 
 // -------- binary build (once per `go test` invocation) --------
@@ -282,6 +283,17 @@ type BinaryHarness struct {
 	apiKey         string
 	daemonTok      string
 	scratchDir     string // daemon-allowed paths for read_file/write_file/exec
+
+	// E2E fields (v0.1.0+). Empty / false = legacy plaintext.
+	e2eEnabled         bool
+	bridgeNoiseKeyPath string
+	daemonNoiseKeyPath string
+	bridgeNoisePubB64  string
+	daemonNoisePubB64  string
+	// allowedBridgePubs is what the daemon will accept. Defaults to
+	// [bridgeNoisePubB64] when enableE2E() is called. Tests can override
+	// to assert ACL rejection.
+	allowedBridgePubs []string
 }
 
 // newBinaryHarness sets up temp dirs, generates TLS material, and writes
@@ -350,6 +362,16 @@ env_allowlist:
 		h.scratchDir, h.scratchDir,
 		h.scratchDir, h.scratchDir,
 		h.scratchDir, h.scratchDir)
+	if h.e2eEnabled {
+		var allowList strings.Builder
+		for _, pub := range h.allowedBridgePubs {
+			fmt.Fprintf(&allowList, "  - %q\n", pub)
+		}
+		body += fmt.Sprintf(`e2e_mode: required
+noise_static_key_path: %s
+allowed_bridge_pubkeys:
+%s`, h.daemonNoiseKeyPath, allowList.String())
+	}
 	if err := os.WriteFile(h.daemonCfgPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write daemon cfg: %v", err)
 	}
@@ -364,6 +386,12 @@ api_key: %s
 cert_pin: %s
 target_daemon: lab01
 `, h.gatewayURL, h.apiKey, h.tls.pin)
+	if h.e2eEnabled {
+		body += fmt.Sprintf(`e2e_mode: required
+bridge_static_key_path: %s
+daemon_pubkey: %q
+`, h.bridgeNoiseKeyPath, h.daemonNoisePubB64)
+	}
 	if err := os.WriteFile(h.bridgeCfgPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write bridge cfg: %v", err)
 	}
@@ -440,6 +468,34 @@ func (h *BinaryHarness) callTool(t *testing.T, bridge *runningProc, id int, name
 		t.Fatalf("missing result for %s: %+v", name, resp)
 	}
 	return res
+}
+
+// enableE2E generates fresh X25519 keypairs for bridge and daemon, saves
+// the private halves to disk, and seeds the allowlist with the legitimate
+// bridge pubkey. Tests asserting ACL rejection should mutate
+// h.allowedBridgePubs AFTER calling this (before setupRunning).
+func (h *BinaryHarness) enableE2E(t *testing.T) {
+	t.Helper()
+	bk, err := e2e.GenerateStatic()
+	if err != nil {
+		t.Fatalf("e2e: bridge keygen: %v", err)
+	}
+	dk, err := e2e.GenerateStatic()
+	if err != nil {
+		t.Fatalf("e2e: daemon keygen: %v", err)
+	}
+	h.bridgeNoiseKeyPath = filepath.Join(h.tmpDir, "bridge_noise.key")
+	if err := bk.Save(h.bridgeNoiseKeyPath); err != nil {
+		t.Fatalf("save bridge noise key: %v", err)
+	}
+	h.daemonNoiseKeyPath = filepath.Join(h.tmpDir, "daemon_noise.key")
+	if err := dk.Save(h.daemonNoiseKeyPath); err != nil {
+		t.Fatalf("save daemon noise key: %v", err)
+	}
+	h.bridgeNoisePubB64 = bk.PubBase64()
+	h.daemonNoisePubB64 = dk.PubBase64()
+	h.allowedBridgePubs = []string{h.bridgeNoisePubB64}
+	h.e2eEnabled = true
 }
 
 // setupRunning is the standard sequence: write gateway cfg, start gateway,
