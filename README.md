@@ -1,5 +1,7 @@
 # agbridge
 
+[![ci](https://github.com/pw0rld/agbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/pw0rld/agbridge/actions/workflows/ci.yml)
+
 AI agent remote operation surface over restrictive networks (TLS:443 + MCP).
 
 Status: Phase 5 — four MCP tools end-to-end plus production-grade

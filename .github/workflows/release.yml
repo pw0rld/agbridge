@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)release artifacts for (e.g., v0.1.0-phase-a)'
+        required: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: build binary
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+        run: |
+          out="agbridge-${GOOS}-${GOARCH}"
+          go build -trimpath -ldflags="-s -w" -o "${out}" ./cmd/agbridge
+          ls -la "${out}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          path: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: compute SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum agbridge-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: resolve tag name
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "${INPUT_TAG}" ]; then
+            echo "name=${INPUT_TAG}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          files: |
+            dist/agbridge-*
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
