@@ -120,7 +120,10 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 	if ack, _ := bconn.Recv(ctx); ack.Type != proto.FrameTypeHelloAck {
 		t.Fatalf("bridge hello ack: %v", ack.Type)
 	}
-	rt := newRouter(ctx, bconn, []byte("api-key-1"))
+	rt, err := newRouter(ctx, bconn, []byte("api-key-1"), &config.BridgeConfig{E2EMode: "disabled"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	go rt.runReader()
 
 	srv := mcp.NewServer()
