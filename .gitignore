@@ -13,3 +13,10 @@
 
 # OS
 .DS_Store
+
+# Planning docs (private, not part of OSS)
+/docs/
+
+# Operational state from running gateway/daemon
+audit.jsonl
+
