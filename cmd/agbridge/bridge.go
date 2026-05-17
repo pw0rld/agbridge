@@ -134,6 +134,25 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.writeFileHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
+				Name: "edit_file",
+				Description: "Partial edit: replace old_string with new_string in the " +
+					"file at path. Atomic. By default old_string must occur exactly once " +
+					"(returns ambiguous_match otherwise); set replace_all=true to replace " +
+					"every occurrence. Much cheaper than read_file + write_file for " +
+					"small changes to large files.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        map[string]any{"type": "string"},
+						"old_string":  map[string]any{"type": "string"},
+						"new_string":  map[string]any{"type": "string"},
+						"replace_all": map[string]any{"type": "boolean"},
+					},
+					"required": []string{"path", "old_string", "new_string"},
+				},
+			}, rt.editFileHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
 				Name:        "port_forward",
 				Description: "Bind a local TCP listener that forwards new connections to remote_host:remote_port on the daemon machine.",
 				InputSchema: map[string]any{
@@ -911,6 +930,71 @@ connected:
 
 	closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
 	_ = r.sendInner(context.Background(), proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload})
+}
+
+type editFileArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args editFileArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	if args.OldString == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "old_string is required and must not be empty")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fileproto.FileEditRequest{
+		Path: args.Path, OldString: args.OldString, NewString: args.NewString, ReplaceAll: args.ReplaceAll,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileEditRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeFileComplete:
+			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			if c.Err != "" {
+				msg := "edit_file: " + c.Err
+				if c.ErrDetail != "" {
+					msg = msg + " (" + c.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(c.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{
+					"type": "text",
+					"text": fmt.Sprintf("edited %d bytes (sha256=%s)", c.Size, c.Sha256),
+				}},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "edit_file: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
 }
 
 // capabilitiesHandler sends a FrameTypeCapabilitiesRequest to the daemon

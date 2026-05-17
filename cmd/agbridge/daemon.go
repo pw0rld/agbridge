@@ -273,6 +273,8 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 	case proto.FrameTypeFileWriteRequest:
 		slot := s.beginWrite(inner.ReqID)
 		go s.handleWrite(ctx, inner, slot)
+	case proto.FrameTypeFileEditRequest:
+		go s.handleEdit(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
@@ -458,6 +460,16 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
+	req, err := fileproto.DecodeFileEditRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	complete, _ := tools.EditFile(ctx, req, s.cfg.AllowedWritePaths, maxFileBytes)
+	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
 func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {

@@ -41,6 +41,7 @@ const (
 	FrameTypeFileWriteRequest FrameType = 31
 	FrameTypeFileChunk        FrameType = 32
 	FrameTypeFileComplete     FrameType = 33
+	FrameTypeFileEditRequest  FrameType = 34
 
 	FrameTypeStreamOpen  FrameType = 40
 	FrameTypeStreamAck   FrameType = 41

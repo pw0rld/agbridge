@@ -18,6 +18,18 @@ type FileWriteRequest struct {
 	Mode uint32 `json:"mode,omitempty"`
 }
 
+// FileEditRequest is the bridge → daemon partial-edit request. The daemon
+// reads the file, replaces OldString with NewString (must be unique unless
+// ReplaceAll is set), and atomically writes the result back. The whole
+// exchange is one round-trip — far cheaper than read_file + write_file
+// for AI agents making small changes to large files.
+type FileEditRequest struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
 // FileChunk carries one slice of file content. Used for both read (daemon →
 // bridge) and write (bridge → daemon).
 type FileChunk struct {
@@ -38,6 +50,7 @@ type FileComplete struct {
 
 func (r FileReadRequest) Encode() ([]byte, error)  { return json.Marshal(r) }
 func (r FileWriteRequest) Encode() ([]byte, error) { return json.Marshal(r) }
+func (r FileEditRequest) Encode() ([]byte, error)  { return json.Marshal(r) }
 func (c FileChunk) Encode() ([]byte, error)        { return json.Marshal(c) }
 func (c FileComplete) Encode() ([]byte, error)     { return json.Marshal(c) }
 
@@ -49,6 +62,12 @@ func DecodeFileReadRequest(b []byte) (FileReadRequest, error) {
 
 func DecodeFileWriteRequest(b []byte) (FileWriteRequest, error) {
 	var r FileWriteRequest
+	err := json.Unmarshal(b, &r)
+	return r, err
+}
+
+func DecodeFileEditRequest(b []byte) (FileEditRequest, error) {
+	var r FileEditRequest
 	err := json.Unmarshal(b, &r)
 	return r, err
 }
