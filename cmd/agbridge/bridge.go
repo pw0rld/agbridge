@@ -29,6 +29,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -176,6 +177,29 @@ func newBridgeCmd() *cobra.Command {
 			for _, spec := range bgExecTools(rt) {
 				srv.RegisterTool(spec.Spec, spec.Handler)
 			}
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "search",
+				Description: "Search file contents on the daemon machine. Pure-Go, " +
+					"replaces 'exec grep -rn' — no shell quoting, no cross-platform " +
+					"grep differences, structured [{file,line,column,snippet}] output. " +
+					"Skips .git / node_modules / vendor / __pycache__ / .next / dist / " +
+					"build / target / .venv / virtualenvs / IDE caches. Binary files " +
+					"auto-detected and skipped. Honors allowed_read_paths.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"pattern":          map[string]any{"type": "string"},
+						"path":             map[string]any{"type": "string"},
+						"regex":            map[string]any{"type": "boolean", "description": "default true; false = literal substring"},
+						"glob":             map[string]any{"type": "string", "description": "optional filename filter, e.g. *.go"},
+						"case_insensitive": map[string]any{"type": "boolean"},
+						"max_results":      map[string]any{"type": "integer", "minimum": 1, "description": "default 200"},
+						"max_files":        map[string]any{"type": "integer", "minimum": 1, "description": "default 10000"},
+					},
+					"required": []string{"pattern", "path"},
+				},
+			}, rt.searchHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
 				Name: "upload",
@@ -1245,6 +1269,94 @@ func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		case proto.FrameTypeError:
 			code, detail := errcode.DecodeFramePayload(f.Payload)
 			msg := "edit_file: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type searchArgs struct {
+	Pattern         string `json:"pattern"`
+	Path            string `json:"path"`
+	Regex           *bool  `json:"regex,omitempty"` // pointer to detect omitted
+	Glob            string `json:"glob,omitempty"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+	MaxResults      int    `json:"max_results,omitempty"`
+	MaxFiles        int    `json:"max_files,omitempty"`
+}
+
+func (r *router) searchHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args searchArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Pattern == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "pattern required")), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path required")), nil
+	}
+	// Default regex=true when not specified
+	regexMode := true
+	if args.Regex != nil {
+		regexMode = *args.Regex
+	}
+	req := searchproto.SearchRequest{
+		Pattern: args.Pattern, Path: args.Path, Regex: regexMode,
+		Glob: args.Glob, CaseInsensitive: args.CaseInsensitive,
+		MaxResults: args.MaxResults, MaxFiles: args.MaxFiles,
+	}
+	reqID := newReqID()
+	reqJSON, _ := req.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeSearchResponse:
+			resp, _ := searchproto.DecodeSearchResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "search: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			var b strings.Builder
+			for _, m := range resp.Results {
+				b.WriteString(fmt.Sprintf("%s:%d:%d: %s\n", m.File, m.Line, m.Column, m.Snippet))
+			}
+			if b.Len() == 0 {
+				b.WriteString(fmt.Sprintf("(no matches in %d files)", resp.TotalFilesSearched))
+			} else if resp.Truncated {
+				b.WriteString(fmt.Sprintf("--- showing %d of %d matches (truncated) ---\n",
+					len(resp.Results), resp.TotalMatched))
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": b.String()}},
+				"_meta": map[string]any{
+					"results":              resp.Results,
+					"total_matched":        resp.TotalMatched,
+					"total_files_searched": resp.TotalFilesSearched,
+					"truncated":            resp.Truncated,
+					"duration_ms":          resp.DurationMs,
+				},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "search: " + code
 			if detail != "" {
 				msg = msg + " (" + detail + ")"
 			}
