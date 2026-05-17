@@ -107,13 +107,18 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.execHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
-				Name:        "read_file",
-				Description: "Read a file on the remote daemon machine. Returns content + sha256 in _meta.",
+				Name: "read_file",
+				Description: "Read a file on the remote daemon machine. Returns content " +
+					"+ sha256 in _meta. offset+limit support partial reads — e.g. " +
+					"offset=1000, limit=500 returns 500 bytes starting at byte 1000. " +
+					"Use this to avoid loading whole large files into context.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":     map[string]any{"type": "string"},
 						"max_size": map[string]any{"type": "integer"},
+						"offset":   map[string]any{"type": "integer", "minimum": 0},
+						"limit":    map[string]any{"type": "integer", "minimum": 0},
 					},
 					"required": []string{"path"},
 				},
@@ -635,6 +640,8 @@ func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
 type readFileArgs struct {
 	Path    string `json:"path"`
 	MaxSize int    `json:"max_size"`
+	Offset  int64  `json:"offset"`
+	Limit   int64  `json:"limit"`
 }
 
 func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -646,7 +653,9 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
 	reqID := newReqID()
-	reqJSON, _ := fileproto.FileReadRequest{Path: args.Path, MaxSize: args.MaxSize}.Encode()
+	reqJSON, _ := fileproto.FileReadRequest{
+		Path: args.Path, MaxSize: args.MaxSize, Offset: args.Offset, Limit: args.Limit,
+	}.Encode()
 
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
@@ -692,19 +701,23 @@ func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 		}
 		return mcpErrorResult(errcode.New(c.Err, msg))
 	}
+	meta := map[string]any{
+		"size":   c.Size,
+		"sha256": c.Sha256,
+	}
 	var text string
 	if utf8.Valid(content) {
 		text = string(content)
 	} else {
+		// Binary file: emit base64 only when not UTF-8. Text reads
+		// (the common case) skip this — halving JSON payload size and
+		// making MCP-client parsing much faster.
 		text = fmt.Sprintf("(binary %d bytes, sha256=%s)", c.Size, c.Sha256)
+		meta["content_b64"] = base64.StdEncoding.EncodeToString(content)
 	}
 	return map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
-		"_meta": map[string]any{
-			"size":        c.Size,
-			"sha256":      c.Sha256,
-			"content_b64": base64.StdEncoding.EncodeToString(content),
-		},
+		"_meta":   meta,
 	}
 }
 

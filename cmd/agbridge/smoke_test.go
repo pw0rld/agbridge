@@ -213,13 +213,11 @@ func TestSmokePhase4ReadFile(t *testing.T) {
 	if got := meta["sha256"].(string); got != wantHex {
 		t.Errorf("sha256: got %s want %s", got, wantHex)
 	}
-	gotB64 := meta["content_b64"].(string)
-	gotBytes, err := base64.StdEncoding.DecodeString(gotB64)
-	if err != nil {
-		t.Fatalf("decode content_b64: %v", err)
-	}
-	if !bytes.Equal(gotBytes, content) {
-		t.Errorf("content mismatch: got %q want %q", gotBytes, content)
+	// For UTF-8 content, the text body holds the file directly.
+	// content_b64 is only emitted for non-UTF-8 binary content.
+	gotText := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !bytes.Equal([]byte(gotText), content) {
+		t.Errorf("content mismatch: got %q want %q", gotText, content)
 	}
 }
 
