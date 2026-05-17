@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -185,10 +186,50 @@ func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths [
 		return fileproto.FileComplete{Err: "rename_failed"}, nil
 	}
 
+	// GC old backups so successive edits don't leave an unbounded trail
+	// behind. Keep the most recent BackupRetainCount (default 5) and
+	// delete the rest. Best-effort: failures here don't break the edit.
+	pruneOldBackups(req.Path, BackupRetainCount)
+
 	h := sha256.Sum256([]byte(next))
 	return fileproto.FileComplete{
 		Size:       int64(len(next)),
 		Sha256:     hex.EncodeToString(h[:]),
 		BackupPath: backupPath,
 	}, nil
+}
+
+// BackupRetainCount is the per-file cap on .bak.* files; older backups
+// are deleted when each successful edit creates a new one. v0.3 default
+// 5 — enough for an undo trail without unbounded disk growth.
+const BackupRetainCount = 5
+
+// pruneOldBackups deletes the oldest .bak.* siblings of path, keeping
+// at most keep. Determined by mtime descending so the most recent
+// backup files (whichever they are) survive.
+func pruneOldBackups(path string, keep int) {
+	if keep <= 0 {
+		return
+	}
+	matches, err := filepath.Glob(path + ".bak.*")
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	type entry struct {
+		name string
+		mod  int64
+	}
+	entries := make([]entry, 0, len(matches))
+	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, entry{name: m, mod: info.ModTime().UnixNano()})
+	}
+	// Sort descending by mtime (newest first); delete everything past keep.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mod > entries[j].mod })
+	for i := keep; i < len(entries); i++ {
+		_ = os.Remove(entries[i].name)
+	}
 }
