@@ -62,6 +62,9 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: include install.sh
+        run: cp scripts/install.sh dist/install.sh
+
       - name: compute SHA256SUMS
         working-directory: dist
         run: |

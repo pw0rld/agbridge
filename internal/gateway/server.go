@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/http"
 
 	"github.com/pw0rld/agbridge/internal/audit"
 	"github.com/pw0rld/agbridge/internal/auth"
@@ -37,8 +38,15 @@ type Instance struct {
 }
 
 // Run starts the gateway and returns an Instance handle.
+// Equivalent to RunWithHandler(..., nil).
 func Run(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer) (*Instance, error) {
-	ln, err := wss.Listen(ctx, cfg.Listen, tlsCfg)
+	return RunWithHandler(ctx, tlsCfg, cfg, aud, nil)
+}
+
+// RunWithHandler is like Run but mounts extra under non-WS routes on the
+// shared TLS:443 listener. Used to expose POST /v1/enroll.
+func RunWithHandler(ctx context.Context, tlsCfg *tls.Config, cfg *config.GatewayConfig, aud *audit.Writer, extra http.Handler) (*Instance, error) {
+	ln, err := wss.ListenWithHandler(ctx, cfg.Listen, tlsCfg, extra)
 	if err != nil {
 		return nil, err
 	}

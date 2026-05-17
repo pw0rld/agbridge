@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -22,7 +23,18 @@ type Listener struct {
 }
 
 // Listen starts a TLS:port listener that upgrades incoming HTTP to WSS.
+// All non-WSS paths return 404. For routes alongside WSS (e.g. /v1/enroll)
+// use ListenWithHandler.
 func Listen(ctx context.Context, addr string, tlsCfg *tls.Config) (*Listener, error) {
+	return ListenWithHandler(ctx, addr, tlsCfg, nil)
+}
+
+// ListenWithHandler is like Listen but mounts extra as an HTTP handler
+// for non-WSS requests on the same TLS port. WSS upgrade is preferred:
+// any request with the WebSocket Upgrade header is routed to the WS
+// handler regardless of path; everything else falls through to extra
+// (which receives a 404 for unknown paths).
+func ListenWithHandler(ctx context.Context, addr string, tlsCfg *tls.Config, extra http.Handler) (*Listener, error) {
 	if tlsCfg.MinVersion == 0 {
 		tlsCfg.MinVersion = tls.VersionTLS13
 	}
@@ -36,8 +48,7 @@ func Listen(ctx context.Context, addr string, tlsCfg *tls.Config) (*Listener, er
 		closeCh: make(chan struct{}),
 	}
 	up := websocket.Upgrader{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	wsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -50,9 +61,27 @@ func Listen(ctx context.Context, addr string, tlsCfg *tls.Config) (*Listener, er
 			_ = ws.Close()
 		}
 	})
-	l.httpSrv = &http.Server{Handler: mux}
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isWebSocketUpgrade(r) {
+			wsHandler.ServeHTTP(w, r)
+			return
+		}
+		if extra != nil {
+			extra.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	l.httpSrv = &http.Server{Handler: root}
 	go l.httpSrv.Serve(ln)
 	return l, nil
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	conn := r.Header.Get("Connection")
+	upg := r.Header.Get("Upgrade")
+	return strings.Contains(strings.ToLower(conn), "upgrade") &&
+		strings.EqualFold(upg, "websocket")
 }
 
 func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
