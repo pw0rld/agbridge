@@ -23,16 +23,19 @@ import (
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
+	"github.com/pw0rld/agbridge/internal/state"
 	"github.com/pw0rld/agbridge/internal/streamproto"
 	"github.com/pw0rld/agbridge/internal/tools"
 	"github.com/pw0rld/agbridge/internal/transport"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
+
+	"path/filepath"
 )
 
 const maxFileBytes = 10 << 20
 
 func newDaemonCmd() *cobra.Command {
-	var cfgPath string
+	var cfgPath, stateDir string
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the agent-side daemon",
@@ -40,7 +43,7 @@ func newDaemonCmd() *cobra.Command {
 			if err := sandbox.RefuseRoot(); err != nil {
 				return err
 			}
-			cfg, err := config.LoadDaemon(cfgPath)
+			cfg, err := loadDaemonConfig(cfgPath, stateDir)
 			if err != nil {
 				return err
 			}
@@ -83,9 +86,46 @@ func newDaemonCmd() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().StringVar(&cfgPath, "config", "", "path to daemon YAML config")
-	_ = cmd.MarkFlagRequired("config")
+	cmd.Flags().StringVar(&cfgPath, "config", "", "path to daemon YAML config (legacy)")
+	cmd.Flags().StringVar(&stateDir, "state-dir", "", "directory containing state.json + daemon_noise.key")
 	return cmd
+}
+
+// loadDaemonConfig prefers stateDir/state.json when present; otherwise
+// falls back to legacy --config YAML.
+func loadDaemonConfig(cfgPath, stateDir string) (*config.DaemonConfig, error) {
+	if stateDir != "" {
+		statePath := filepath.Join(stateDir, "state.json")
+		st, err := state.LoadDaemon(statePath)
+		if err != nil {
+			return nil, fmt.Errorf("load %s: %w", statePath, err)
+		}
+		if err := st.Validate(); err != nil {
+			return nil, err
+		}
+		return daemonConfigFromState(st), nil
+	}
+	if cfgPath == "" {
+		return nil, fmt.Errorf("daemon: either --state-dir or --config is required")
+	}
+	return config.LoadDaemon(cfgPath)
+}
+
+func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
+	return &config.DaemonConfig{
+		GatewayURL:           s.Gateway.URL,
+		DaemonName:           s.DaemonName,
+		RegistrationToken:    s.APIKey,
+		CertPin:              s.Gateway.CertPin,
+		AllowedExecCwds:      s.AllowedExecCwds,
+		EnvAllowlist:         s.EnvAllowlist,
+		AllowedReadPaths:     s.AllowedReadPaths,
+		AllowedWritePaths:    s.AllowedWritePaths,
+		ForbiddenPorts:       s.ForbiddenPorts,
+		E2EMode:              s.E2EMode,
+		NoiseStaticKeyPath:   s.NoiseStaticKeyPath,
+		AllowedBridgePubkeys: s.AllowedBridgePubkeys,
+	}
 }
 
 // daemonDialAndHandshake dials the gateway and runs the daemon-side
@@ -355,6 +395,13 @@ func (s *daemonState) handleNoiseInit(ctx context.Context, f proto.Frame) {
 func (s *daemonState) peerAllowed(peer []byte) bool {
 	if s.e2e == nil {
 		return false
+	}
+	if len(s.e2e.allowedPubs) == 0 {
+		// e2e_mode=required + empty allowlist is rejected at startup
+		// (loadDaemonE2EDeps), so we only land here in optional mode.
+		// In that case the operator has not pinned any specific bridge —
+		// accept whoever the gateway has authenticated.
+		return s.e2e.mode == "optional"
 	}
 	for _, a := range s.e2e.allowedPubs {
 		if bytes.Equal(a, peer) {
