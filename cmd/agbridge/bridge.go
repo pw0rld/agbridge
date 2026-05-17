@@ -649,7 +649,11 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 
 func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 	if c.Err != "" {
-		return mcpErrorResult(errcode.New(c.Err, "read_file: "+c.Err))
+		msg := "read_file: " + c.Err
+		if c.ErrDetail != "" {
+			msg = msg + " (" + c.ErrDetail + ")"
+		}
+		return mcpErrorResult(errcode.New(c.Err, msg))
 	}
 	var text string
 	if utf8.Valid(content) {
@@ -729,7 +733,11 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(f.Payload)
 				if c.Err != "" {
-					return mcpErrorResult(errcode.New(c.Err, "write_file: "+c.Err)), nil
+					msg := "write_file: " + c.Err
+					if c.ErrDetail != "" {
+						msg = msg + " (" + c.ErrDetail + ")"
+					}
+					return mcpErrorResult(errcode.New(c.Err, msg)), nil
 				}
 				return map[string]any{
 					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("wrote %d bytes (sha256=%s)", c.Size, c.Sha256)}},

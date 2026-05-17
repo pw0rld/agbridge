@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -78,14 +79,24 @@ func TestReadFilePathForbidden(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.txt")
 	_ = os.WriteFile(path, []byte("x"), 0o644)
+	allowlist := []string{"/different/a", "/different/b/*"}
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: path}, []string{"/different/*"}, 1<<20,
+		fileproto.FileReadRequest{Path: path}, allowlist, 1<<20,
 		func(c fileproto.FileChunk) {})
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	if complete.Err != "path_forbidden" {
 		t.Errorf("err: %q", complete.Err)
+	}
+	// detail must surface the allowlist so the AI knows what's permitted
+	if complete.ErrDetail == "" {
+		t.Fatal("ErrDetail should not be empty for path_forbidden")
+	}
+	for _, want := range allowlist {
+		if !strings.Contains(complete.ErrDetail, want) {
+			t.Errorf("ErrDetail %q missing allowlist entry %q", complete.ErrDetail, want)
+		}
 	}
 }
 

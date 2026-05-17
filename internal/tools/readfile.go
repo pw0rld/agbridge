@@ -28,7 +28,10 @@ type FileChunkEmitter func(c fileproto.FileChunk)
 // IO errors are returned as the second value.
 func ReadFile(ctx context.Context, req fileproto.FileReadRequest, allowedPaths []string, maxBytes int64, onChunk FileChunkEmitter) (fileproto.FileComplete, error) {
 	if !sandbox.PathAllowed(req.Path, allowedPaths) {
-		return fileproto.FileComplete{Err: "path_forbidden"}, nil
+		return fileproto.FileComplete{
+			Err:       "path_forbidden",
+			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
+		}, nil
 	}
 	f, err := os.Open(req.Path)
 	if err != nil {

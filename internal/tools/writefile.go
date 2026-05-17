@@ -26,7 +26,10 @@ type ChunkSource func() (fileproto.FileChunk, error)
 // in place.
 func WriteFile(ctx context.Context, req fileproto.FileWriteRequest, allowedPaths []string, maxBytes int64, nextChunk ChunkSource) (fileproto.FileComplete, error) {
 	if !sandbox.PathAllowed(req.Path, allowedPaths) {
-		return fileproto.FileComplete{Err: "path_forbidden"}, nil
+		return fileproto.FileComplete{
+			Err:       "path_forbidden",
+			ErrDetail: "path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
+		}, nil
 	}
 	mode := os.FileMode(req.Mode)
 	if mode == 0 {
