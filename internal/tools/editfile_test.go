@@ -92,14 +92,90 @@ func TestEditFileAmbiguousWithoutReplaceAll(t *testing.T) {
 	if complete.Err != "ambiguous_match" {
 		t.Errorf("expected ambiguous_match, got %q (%s)", complete.Err, complete.ErrDetail)
 	}
-	// Detail should tell AI how many matches there were
+	// Detail should tell AI how many matches there were AND which lines
 	if !strings.Contains(complete.ErrDetail, "2") {
 		t.Errorf("ErrDetail should include match count: %q", complete.ErrDetail)
+	}
+	if !strings.Contains(complete.ErrDetail, "lines") || !strings.Contains(complete.ErrDetail, "1, 2") {
+		t.Errorf("ErrDetail should include line numbers, got: %q", complete.ErrDetail)
 	}
 	// File must be unchanged
 	got, _ := os.ReadFile(path)
 	if string(got) != "foo\nfoo\n" {
 		t.Errorf("file should be unchanged on ambiguous_match")
+	}
+}
+
+func TestEditFileMatchLinesAcrossFile(t *testing.T) {
+	body := "alpha\nbeta\nfoo\ngamma\nfoo\ndelta\nfoo here\n"
+	got := matchLines(body, "foo")
+	want := []int{3, 5, 7}
+	if len(got) != len(want) {
+		t.Fatalf("got lines %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("at idx %d got %d want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEditFileWritesBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "orig.txt")
+	orig := []byte("original content here\n")
+	_ = os.WriteFile(path, orig, 0o644)
+	allow := []string{dir + "/*"}
+
+	complete, err := EditFile(context.Background(),
+		fileproto.FileEditRequest{Path: path, OldString: "original", NewString: "MODIFIED"},
+		allow, 1<<20)
+	if err != nil {
+		t.Fatalf("EditFile: %v", err)
+	}
+	if complete.Err != "" {
+		t.Fatalf("err: %q (%s)", complete.Err, complete.ErrDetail)
+	}
+	if complete.BackupPath == "" {
+		t.Fatal("BackupPath should be set after successful edit")
+	}
+	if !strings.HasPrefix(complete.BackupPath, path+".bak.") {
+		t.Errorf("BackupPath should start with %s.bak.: got %s", path, complete.BackupPath)
+	}
+	backupBytes, err := os.ReadFile(complete.BackupPath)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backupBytes) != string(orig) {
+		t.Errorf("backup content mismatch: got %q want %q", backupBytes, orig)
+	}
+	// And the actual file got edited
+	cur, _ := os.ReadFile(path)
+	if !strings.Contains(string(cur), "MODIFIED") {
+		t.Errorf("primary file not edited: %s", cur)
+	}
+}
+
+func TestEditFileBackupNotCreatedOnPreCheckErrors(t *testing.T) {
+	// If the edit fails its pre-checks (path_forbidden / not_found /
+	// old_string_not_found / ambiguous_match / etc.), no backup should
+	// be written and BackupPath should be empty.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	_ = os.WriteFile(path, []byte("hello"), 0o644)
+	allow := []string{dir + "/*"}
+	complete, _ := EditFile(context.Background(),
+		fileproto.FileEditRequest{Path: path, OldString: "absent", NewString: "x"},
+		allow, 1<<20)
+	if complete.Err != "old_string_not_found" {
+		t.Fatalf("expected old_string_not_found, got %q", complete.Err)
+	}
+	if complete.BackupPath != "" {
+		t.Errorf("BackupPath should be empty when edit fails: got %q", complete.BackupPath)
+	}
+	matches, _ := filepath.Glob(path + ".bak.*")
+	if len(matches) != 0 {
+		t.Errorf("no .bak file should exist after failed edit, got: %v", matches)
 	}
 }
 

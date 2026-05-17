@@ -10,11 +10,44 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
 )
+
+// matchLines returns the 1-indexed line numbers where needle starts within
+// body. Used by edit_file ambiguous_match error to tell the AI exactly
+// which lines clashed, so it can extend old_string with surrounding
+// context to make the match unique.
+func matchLines(body, needle string) []int {
+	var lines []int
+	if needle == "" {
+		return lines
+	}
+	offset := 0
+	for offset < len(body) {
+		i := strings.Index(body[offset:], needle)
+		if i < 0 {
+			break
+		}
+		absIdx := offset + i
+		line := 1 + strings.Count(body[:absIdx], "\n")
+		lines = append(lines, line)
+		offset = absIdx + len(needle)
+	}
+	return lines
+}
+
+func joinInts(xs []int, sep string) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, sep)
+}
 
 // EditFile performs a single old_string → new_string replacement on the
 // file at req.Path. If ReplaceAll is false, exactly one occurrence must
@@ -83,9 +116,13 @@ func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths [
 		return fileproto.FileComplete{Err: "old_string_not_found"}, nil
 	}
 	if count > 1 && !req.ReplaceAll {
+		lines := matchLines(body, req.OldString)
 		return fileproto.FileComplete{
-			Err:       "ambiguous_match",
-			ErrDetail: fmt.Sprintf("old_string occurs %d times; pass replace_all=true to replace all or supply more context to make the match unique", count),
+			Err: "ambiguous_match",
+			ErrDetail: fmt.Sprintf(
+				"old_string occurs %d times (at lines %s); pass replace_all=true or extend old_string with surrounding context to make the match unique",
+				count, joinInts(lines, ", "),
+			),
 		}, nil
 	}
 
@@ -94,6 +131,24 @@ func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths [
 		next = strings.ReplaceAll(body, req.OldString, req.NewString)
 	} else {
 		next = strings.Replace(body, req.OldString, req.NewString, 1)
+	}
+
+	// Backup original before atomic rewrite. AI agents misjudge old_string
+	// context routinely; .bak gives operators a one-shot undo path. Filename
+	// embeds a content hash so concurrent edits don't collide, and timestamp
+	// so the operator can pick the right one.
+	backupPath := ""
+	if len(contents) > 0 {
+		stamp := time.Now().UTC().Format("20060102T150405")
+		h := sha256.Sum256(contents)
+		backupPath = req.Path + ".bak." + stamp + "." + hex.EncodeToString(h[:4])
+		if err := os.WriteFile(backupPath, contents, info.Mode().Perm()); err != nil {
+			// Non-fatal: log via err return path but don't block the edit.
+			// AI agents would rather have an edit succeed without backup
+			// than lose all guarantees. Backup failures are rare (disk
+			// full or perms).
+			backupPath = ""
+		}
 	}
 
 	// Atomic: write tmp in same dir, fsync, rename. Same pattern as
@@ -132,7 +187,8 @@ func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths [
 
 	h := sha256.Sum256([]byte(next))
 	return fileproto.FileComplete{
-		Size:   int64(len(next)),
-		Sha256: hex.EncodeToString(h[:]),
+		Size:       int64(len(next)),
+		Sha256:     hex.EncodeToString(h[:]),
+		BackupPath: backupPath,
 	}, nil
 }
