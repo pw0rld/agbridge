@@ -51,6 +51,11 @@ const (
 	FrameTypeNoiseInit  FrameType = 50
 	FrameTypeNoiseResp  FrameType = 51
 	FrameTypeNoiseRekey FrameType = 52
+
+	// Policy/capabilities introspection (v0.2.0+). Bridge → daemon empty
+	// payload; daemon → bridge JSON describing current sandbox + meta.
+	FrameTypeCapabilitiesRequest  FrameType = 60
+	FrameTypeCapabilitiesResponse FrameType = 61
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/e2e"
@@ -272,6 +273,8 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 	case proto.FrameTypeFileWriteRequest:
 		slot := s.beginWrite(inner.ReqID)
 		go s.handleWrite(ctx, inner, slot)
+	case proto.FrameTypeCapabilitiesRequest:
+		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
 		s.deliverFileChunk(ctx, inner)
 	case proto.FrameTypeStreamOpen:
@@ -435,6 +438,26 @@ func (s *daemonState) handleExec(ctx context.Context, inner proto.Frame) {
 	}
 	completePayload, _ := complete.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeExecComplete, ReqID: inner.ReqID, Payload: completePayload})
+}
+
+// handleCapabilities answers a FrameTypeCapabilitiesRequest with the
+// daemon's current sandbox + meta. Lets an AI agent introspect what
+// it's allowed to do instead of discovering by trial-and-error.
+func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame) {
+	hostname, _ := os.Hostname()
+	caps := capabilities.Capabilities{
+		DaemonName:        s.cfg.DaemonName,
+		DaemonHostname:    hostname,
+		AllowedExecCwds:   append([]string(nil), s.cfg.AllowedExecCwds...),
+		AllowedReadPaths:  append([]string(nil), s.cfg.AllowedReadPaths...),
+		AllowedWritePaths: append([]string(nil), s.cfg.AllowedWritePaths...),
+		EnvAllowlist:      append([]string(nil), s.cfg.EnvAllowlist...),
+		ForbiddenPorts:    append([]int(nil), s.cfg.ForbiddenPorts...),
+		MaxFileBytes:      maxFileBytes,
+		AgbridgeVersion:   agbridgeVersion,
+	}
+	payload, _ := caps.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
 }
 
 func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {
