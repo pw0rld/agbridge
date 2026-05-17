@@ -73,6 +73,12 @@ const (
 	// fields; the response frame mirrors the action plus result fields.
 	FrameTypeBgExecRequest  FrameType = 80
 	FrameTypeBgExecResponse FrameType = 81
+
+	// Native search (v0.3.0+). Replaces "exec grep" so AI agents don't
+	// have to deal with cross-platform grep / shell quoting / output
+	// format inconsistencies.
+	FrameTypeSearchRequest  FrameType = 90
+	FrameTypeSearchResponse FrameType = 91
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific

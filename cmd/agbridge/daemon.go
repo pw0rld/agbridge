@@ -24,6 +24,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
@@ -293,6 +294,8 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleDownload(ctx, inner)
 	case proto.FrameTypeBgExecRequest:
 		go s.handleBgExec(ctx, inner)
+	case proto.FrameTypeSearchRequest:
+		go s.handleSearch(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
@@ -553,6 +556,18 @@ func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
 	}
 	complete, _ := tools.ReadFile(ctx, rdReq, s.cfg.AllowedReadPaths, tools.UploadMaxBytes, onChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+func (s *daemonState) handleSearch(ctx context.Context, inner proto.Frame) {
+	req, err := searchproto.DecodeSearchRequest(inner.Payload)
+	if err != nil {
+		payload, _ := searchproto.SearchResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.Search(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
 }
 
 func (s *daemonState) handleBgExec(ctx context.Context, inner proto.Frame) {
