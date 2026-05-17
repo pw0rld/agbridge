@@ -28,6 +28,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -170,6 +171,36 @@ func newBridgeCmd() *cobra.Command {
 					"required": []string{"remote_host", "remote_port"},
 				},
 			}, rt.portForwardHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "list_directory",
+				Description: "List immediate children of a directory on the remote " +
+					"daemon machine. Non-recursive. Returns [{name, type, size, mode, " +
+					"mod_time}]. Use this instead of `exec ls` — cleaner output, no " +
+					"shell quoting concerns.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []string{"path"},
+				},
+			}, rt.listDirectoryHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "stat",
+				Description: "Metadata for a single path on the remote daemon — name, " +
+					"type (file/dir/symlink/other), size, mode, mod_time. Returns " +
+					"not_found if the path is absent. Useful for existence check + " +
+					"size lookup without reading file content.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []string{"path"},
+				},
+			}, rt.statHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
 				Name: "capabilities",
@@ -1051,6 +1082,122 @@ func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		}
 		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
 	}
+}
+
+type pathOnlyArgs struct {
+	Path string `json:"path"`
+}
+
+func (r *router) listDirectoryHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args pathOnlyArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fsproto.ListDirRequest{Path: args.Path}.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeListDirResponse:
+			resp, _ := fsproto.DecodeListDirResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "list_directory: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": renderListDir(resp)}},
+				"_meta":   map[string]any{"entries": resp.Entries, "count": len(resp.Entries)},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "list_directory: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+func (r *router) statHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args pathOnlyArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fsproto.StatRequest{Path: args.Path}.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeStatResponse:
+			resp, _ := fsproto.DecodeStatResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "stat: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf(
+					"name=%s type=%s size=%d mode=%o mod_time=%d",
+					resp.Entry.Name, resp.Entry.Type, resp.Entry.Size, resp.Entry.Mode, resp.Entry.ModTime,
+				)}},
+				"_meta": map[string]any{"entry": resp.Entry},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "stat: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+func renderListDir(resp fsproto.ListDirResponse) string {
+	var b strings.Builder
+	for _, e := range resp.Entries {
+		b.WriteString(fmt.Sprintf("%-4s %10d %o %s\n", e.Type, e.Size, e.Mode, e.Name))
+	}
+	if b.Len() == 0 {
+		return "(empty directory)"
+	}
+	return b.String()
 }
 
 // capabilitiesHandler sends a FrameTypeCapabilitiesRequest to the daemon

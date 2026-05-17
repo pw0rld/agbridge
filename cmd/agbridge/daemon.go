@@ -22,6 +22,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
@@ -275,6 +276,10 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleWrite(ctx, inner, slot)
 	case proto.FrameTypeFileEditRequest:
 		go s.handleEdit(ctx, inner)
+	case proto.FrameTypeListDirRequest:
+		go s.handleListDir(ctx, inner)
+	case proto.FrameTypeStatRequest:
+		go s.handleStat(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
@@ -460,6 +465,30 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleListDir(ctx context.Context, inner proto.Frame) {
+	req, err := fsproto.DecodeListDirRequest(inner.Payload)
+	if err != nil {
+		payload, _ := fsproto.ListDirResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.ListDirectory(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleStat(ctx context.Context, inner proto.Frame) {
+	req, err := fsproto.DecodeStatRequest(inner.Payload)
+	if err != nil {
+		payload, _ := fsproto.StatResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.Stat(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
 }
 
 func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
