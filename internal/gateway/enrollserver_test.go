@@ -55,8 +55,16 @@ func TestEnrollDaemonHappyPath(t *testing.T) {
 	if resp.Name != "lab01" {
 		t.Fatalf("name not returned: %q", resp.Name)
 	}
-	if len(resp.AllowedExecCwds) != 1 || resp.AllowedExecCwds[0] != "/tmp/scratch" {
-		t.Fatalf("policy not piped through: %+v", resp)
+	if len(resp.AllowedExecCwds) != 2 ||
+		resp.AllowedExecCwds[0] != "/tmp/scratch" ||
+		resp.AllowedExecCwds[1] != "/tmp/scratch/*" {
+		t.Fatalf("shorthand not expanded to [dir, dir/*]: %+v", resp.AllowedExecCwds)
+	}
+	if len(resp.AllowedReadPaths) != 2 || resp.AllowedReadPaths[1] != "/tmp/scratch/*" {
+		t.Fatalf("read paths not expanded: %+v", resp.AllowedReadPaths)
+	}
+	if len(resp.AllowedWritePaths) != 2 || resp.AllowedWritePaths[1] != "/tmp/scratch/*" {
+		t.Fatalf("write paths not expanded: %+v", resp.AllowedWritePaths)
 	}
 	if len(resp.ForbiddenPorts) != 1 || resp.ForbiddenPorts[0] != 22 {
 		t.Fatalf("forbidden_ports lost: %+v", resp.ForbiddenPorts)
@@ -162,5 +170,32 @@ func TestEnrollDaemonUpsert(t *testing.T) {
 	}
 	if gs.Daemons[0].NoisePub != "pub2" {
 		t.Fatalf("pubkey not updated: %q", gs.Daemons[0].NoisePub)
+	}
+}
+
+func TestExpandPathShorthand(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"empty", nil, nil},
+		{"single bare", []string{"/foo"}, []string{"/foo", "/foo/*"}},
+		{"already glob", []string{"/foo/*"}, []string{"/foo/*"}},
+		{"mixed", []string{"/foo", "/bar/*"}, []string{"/foo", "/foo/*", "/bar/*"}},
+		{"two bare", []string{"/a", "/b"}, []string{"/a", "/a/*", "/b", "/b/*"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := expandPathShorthand(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len=%d want %d (got=%v want=%v)", len(got), len(tt.want), got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("at %d: got %q want %q (full got=%v want=%v)", i, got[i], tt.want[i], got, tt.want)
+				}
+			}
+		})
 	}
 }

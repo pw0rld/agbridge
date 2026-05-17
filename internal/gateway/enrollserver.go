@@ -7,12 +7,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/state"
 )
+
+// expandPathShorthand emits both the directory itself and its "/*"
+// descendant glob for each entry, matching sandbox.PathAllowed semantics.
+// Entries already ending in "/*" pass through unchanged.
+func expandPathShorthand(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths)*2)
+	for _, p := range paths {
+		if strings.HasSuffix(p, "/*") {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, p, p+"/*")
+	}
+	return out
+}
 
 // EnrollRequest is the device-side payload posted to /v1/enroll.
 type EnrollRequest struct {
@@ -131,7 +150,7 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 			s.State.Daemons = append(s.State.Daemons, entry)
 		}
 		if tok.Policy != nil {
-			paths := tok.Policy.AllowedPaths
+			paths := expandPathShorthand(tok.Policy.AllowedPaths)
 			if len(tok.Policy.AllowedExecCwds) == 0 {
 				resp.AllowedExecCwds = append([]string(nil), paths...)
 			} else {
