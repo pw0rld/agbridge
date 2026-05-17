@@ -26,11 +26,14 @@ type FileChunk struct {
 }
 
 // FileComplete is the terminator. Read: daemon → bridge. Write: daemon →
-// bridge after Eof chunk processed. Err is empty on success.
+// bridge after Eof chunk processed. Err is empty on success. ErrDetail
+// is an operator-/AI-readable description (e.g., allowlist contents on
+// path_forbidden) — old bridges can ignore it.
 type FileComplete struct {
-	Size   int64  `json:"size"`
-	Sha256 string `json:"sha256,omitempty"`
-	Err    string `json:"err,omitempty"`
+	Size      int64  `json:"size"`
+	Sha256    string `json:"sha256,omitempty"`
+	Err       string `json:"err,omitempty"`
+	ErrDetail string `json:"err_detail,omitempty"`
 }
 
 func (r FileReadRequest) Encode() ([]byte, error)  { return json.Marshal(r) }

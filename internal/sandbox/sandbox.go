@@ -30,6 +30,15 @@ func RefuseRoot() error {
 	return nil
 }
 
+// FormatAllowlist renders an allowlist as a short human-readable string
+// suitable for embedding in error messages. Empty input returns "<empty>".
+func FormatAllowlist(allowlist []string) string {
+	if len(allowlist) == 0 {
+		return "<empty>"
+	}
+	return "[" + strings.Join(allowlist, ", ") + "]"
+}
+
 // PathAllowed checks whether path is under any of the prefix-glob entries
 // in allowlist. The path is canonicalized (filepath.Clean) first so that
 // `..` traversal cannot escape an allowed root.
