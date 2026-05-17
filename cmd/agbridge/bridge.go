@@ -660,6 +660,7 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 	}
+	emit := mcp.EmitterFromContext(ctx)
 	reqID := newReqID()
 	req := execproto.ExecRequest{
 		Cmd: args.Cmd, Args: args.Args, Cwd: args.Cwd, Env: args.Env, TimeoutMs: args.TimeoutMs,
@@ -703,6 +704,11 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 				} else {
 					dst.Write(c.Data)
 				}
+				// Forward this chunk to the MCP client as a progress
+				// notification. Total bytes received so far is "progress";
+				// the chunk text is the message body. When the client
+				// didn't request progress, this is a no-op.
+				emit(float64(stdout.Len()+stderr.Len()), nil, string(c.Data))
 			case proto.FrameTypeExecComplete:
 				c, err := execproto.DecodeExecComplete(f.Payload)
 				if err != nil {
