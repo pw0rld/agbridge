@@ -5,10 +5,15 @@ package fileproto
 
 import "encoding/json"
 
-// FileReadRequest is the bridge → daemon read kickoff.
+// FileReadRequest is the bridge → daemon read kickoff. Offset and Limit
+// enable AI-friendly partial reads of large files (e.g., view lines
+// 100-110 of a 5 KLOC source without loading the whole thing into
+// context). MaxSize caps the total returned bytes regardless of Limit.
 type FileReadRequest struct {
 	Path    string `json:"path"`
 	MaxSize int    `json:"max_size,omitempty"`
+	Offset  int64  `json:"offset,omitempty"` // byte offset from start of file (0 = head)
+	Limit   int64  `json:"limit,omitempty"`  // max bytes to read (0 = read to EOF or MaxSize cap)
 }
 
 // FileWriteRequest is the bridge → daemon write kickoff. Subsequent FileChunk
