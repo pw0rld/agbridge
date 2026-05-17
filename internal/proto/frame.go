@@ -61,6 +61,12 @@ const (
 	// payload; daemon → bridge JSON describing current sandbox + meta.
 	FrameTypeCapabilitiesRequest  FrameType = 60
 	FrameTypeCapabilitiesResponse FrameType = 61
+
+	// Bulk file transfer (v0.2.0+). Reuse FileChunk for both directions
+	// and FileComplete for terminal status; new request types carry the
+	// upload mode (chunks vs URL) and download offset/limit.
+	FrameTypeUploadRequest   FrameType = 70
+	FrameTypeDownloadRequest FrameType = 71
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific

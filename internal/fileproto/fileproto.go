@@ -35,6 +35,39 @@ type FileEditRequest struct {
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
 
+// UploadRequest is the bridge → daemon upload kickoff. Unlike write_file,
+// upload has no 10 MiB cap and supports two source modes:
+//
+//   - source="chunks": bridge follows up with N FrameTypeFileChunk frames
+//     carrying the data, last one with Eof=true. Used when the AI client
+//     already has the bytes in memory (e.g., binary embed, downloaded
+//     locally).
+//   - source="url":    daemon performs an HTTP/HTTPS GET against URL and
+//     streams the response straight to disk. Bridge transfers nothing.
+//     Ideal for "fetch this binary from PyPI/npm/GitHub to the daemon
+//     machine" without round-tripping through the AI client.
+//
+// ExpectedSha256, when set, must match the bytes written or upload fails
+// with sha256_mismatch and the file is not committed.
+type UploadRequest struct {
+	DestPath       string `json:"dest_path"`
+	Mode           uint32 `json:"mode,omitempty"`
+	Source         string `json:"source"` // "chunks" | "url"
+	URL            string `json:"url,omitempty"`
+	ExpectedSize   int64  `json:"expected_size,omitempty"`
+	ExpectedSha256 string `json:"expected_sha256,omitempty"`
+}
+
+// DownloadRequest is the bridge → daemon download kickoff. Same wire
+// shape as read_file but goes through the upload/download cap (1 GiB by
+// default) instead of the read_file 10 MiB cap, and is intended for
+// "move a file to the AI client" rather than "show me file contents".
+type DownloadRequest struct {
+	SrcPath string `json:"src_path"`
+	Offset  int64  `json:"offset,omitempty"`
+	Limit   int64  `json:"limit,omitempty"`
+}
+
 // FileChunk carries one slice of file content. Used for both read (daemon →
 // bridge) and write (bridge → daemon).
 type FileChunk struct {
@@ -59,6 +92,8 @@ type FileComplete struct {
 func (r FileReadRequest) Encode() ([]byte, error)  { return json.Marshal(r) }
 func (r FileWriteRequest) Encode() ([]byte, error) { return json.Marshal(r) }
 func (r FileEditRequest) Encode() ([]byte, error)  { return json.Marshal(r) }
+func (r UploadRequest) Encode() ([]byte, error)    { return json.Marshal(r) }
+func (r DownloadRequest) Encode() ([]byte, error)  { return json.Marshal(r) }
 func (c FileChunk) Encode() ([]byte, error)        { return json.Marshal(c) }
 func (c FileComplete) Encode() ([]byte, error)     { return json.Marshal(c) }
 
@@ -76,6 +111,18 @@ func DecodeFileWriteRequest(b []byte) (FileWriteRequest, error) {
 
 func DecodeFileEditRequest(b []byte) (FileEditRequest, error) {
 	var r FileEditRequest
+	err := json.Unmarshal(b, &r)
+	return r, err
+}
+
+func DecodeUploadRequest(b []byte) (UploadRequest, error) {
+	var r UploadRequest
+	err := json.Unmarshal(b, &r)
+	return r, err
+}
+
+func DecodeDownloadRequest(b []byte) (DownloadRequest, error) {
+	var r DownloadRequest
 	err := json.Unmarshal(b, &r)
 	return r, err
 }

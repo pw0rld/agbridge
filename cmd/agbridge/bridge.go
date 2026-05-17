@@ -173,6 +173,47 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.portForwardHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
+				Name: "upload",
+				Description: "Transfer a file to the daemon machine. Two source modes: " +
+					"`chunks` (AI client sends content as base64 chunks, no 10 MB cap) " +
+					"and `url` (daemon performs an HTTP GET against the URL — bridge " +
+					"transfers nothing, ideal for installer/release downloads). " +
+					"Optional expected_sha256 validates integrity before commit. " +
+					"Atomic via temp+rename. Cap: 1 GiB.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"dest_path":       map[string]any{"type": "string"},
+						"source":          map[string]any{"type": "string", "enum": []string{"chunks", "url"}},
+						"chunks_b64":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"url":             map[string]any{"type": "string"},
+						"mode":            map[string]any{"type": "integer"},
+						"expected_size":   map[string]any{"type": "integer"},
+						"expected_sha256": map[string]any{"type": "string"},
+					},
+					"required": []string{"dest_path", "source"},
+				},
+			}, rt.uploadHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "download",
+				Description: "Stream a file from the daemon machine back to the AI " +
+					"client. No 10 MB cap (1 GiB). Optional dest_path makes the bridge " +
+					"save the file locally and return only metadata; without it, the " +
+					"content is returned inline (text if UTF-8, base64 otherwise).",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"src_path":  map[string]any{"type": "string"},
+						"dest_path": map[string]any{"type": "string"},
+						"offset":    map[string]any{"type": "integer", "minimum": 0},
+						"limit":     map[string]any{"type": "integer", "minimum": 0},
+					},
+					"required": []string{"src_path"},
+				},
+			}, rt.downloadHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
 				Name: "port_forward_list",
 				Description: "List active port-forwards established by this bridge. " +
 					"Returns [{local_port, remote_host, remote_port, opened_at}].",
@@ -893,6 +934,11 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 				return map[string]any{
 					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("wrote %d bytes (sha256=%s)", c.Size, c.Sha256)}},
 					"_meta": map[string]any{
+						// `size` matches read_file's _meta key so AI agents
+						// can use one name across all file ops.
+						// `bytes_written` retained for backward-compat with
+						// existing integration tests; treat as deprecated.
+						"size":          c.Size,
 						"bytes_written": c.Size,
 						"sha256":        c.Sha256,
 					},
@@ -1194,6 +1240,207 @@ func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any,
 			return mcpErrorResult(errcode.New(code, msg)), nil
 		}
 		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type uploadArgs struct {
+	DestPath       string   `json:"dest_path"`
+	Source         string   `json:"source"`
+	ChunksB64      []string `json:"chunks_b64,omitempty"`
+	URL            string   `json:"url,omitempty"`
+	Mode           uint32   `json:"mode,omitempty"`
+	ExpectedSize   int64    `json:"expected_size,omitempty"`
+	ExpectedSha256 string   `json:"expected_sha256,omitempty"`
+}
+
+func (r *router) uploadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args uploadArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.DestPath == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "dest_path required")), nil
+	}
+	switch args.Source {
+	case "chunks":
+		if len(args.ChunksB64) == 0 {
+			return mcpErrorResult(errcode.New("bad_payload", "chunks_b64 must be non-empty for source=chunks")), nil
+		}
+	case "url":
+		if args.URL == "" {
+			return mcpErrorResult(errcode.New("bad_payload", "url required for source=url")), nil
+		}
+	default:
+		return mcpErrorResult(errcode.New("bad_payload", "source must be 'chunks' or 'url'")), nil
+	}
+
+	reqID := newReqID()
+	reqJSON, _ := fileproto.UploadRequest{
+		DestPath:       args.DestPath,
+		Mode:           args.Mode,
+		Source:         args.Source,
+		URL:            args.URL,
+		ExpectedSize:   args.ExpectedSize,
+		ExpectedSha256: args.ExpectedSha256,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeUploadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	// For chunks source, stream the base64 chunks now. Last one with Eof=true.
+	if args.Source == "chunks" {
+		for i, c := range args.ChunksB64 {
+			data, err := base64.StdEncoding.DecodeString(c)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", fmt.Sprintf("chunks_b64[%d]: %v", i, err))), nil
+			}
+			eof := i == len(args.ChunksB64)-1
+			if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+			}
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeFileComplete:
+			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			if c.Err != "" {
+				msg := "upload: " + c.Err
+				if c.ErrDetail != "" {
+					msg = msg + " (" + c.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(c.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text",
+					"text": fmt.Sprintf("uploaded %d bytes to %s (sha256=%s)", c.Size, args.DestPath, c.Sha256)}},
+				"_meta": map[string]any{
+					"size":      c.Size,
+					"sha256":    c.Sha256,
+					"dest_path": args.DestPath,
+				},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "upload: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type downloadArgs struct {
+	SrcPath  string `json:"src_path"`
+	DestPath string `json:"dest_path,omitempty"`
+	Offset   int64  `json:"offset,omitempty"`
+	Limit    int64  `json:"limit,omitempty"`
+}
+
+func (r *router) downloadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args downloadArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.SrcPath == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "src_path required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fileproto.DownloadRequest{
+		SrcPath: args.SrcPath, Offset: args.Offset, Limit: args.Limit,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeDownloadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	// If dest_path supplied, stream to local file (no buffering all in
+	// memory). Otherwise buffer and return inline.
+	var (
+		f       *os.File
+		content []byte
+	)
+	if args.DestPath != "" {
+		var err error
+		f, err = os.Create(args.DestPath)
+		if err != nil {
+			return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
+		}
+		defer f.Close()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+		case fr, ok := <-ch:
+			if !ok {
+				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+			}
+			switch fr.Type {
+			case proto.FrameTypeFileChunk:
+				c, err := fileproto.DecodeFileChunk(fr.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+				}
+				if f != nil {
+					if _, err := f.Write(c.Data); err != nil {
+						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
+					}
+				} else {
+					content = append(content, c.Data...)
+				}
+			case proto.FrameTypeFileComplete:
+				c, _ := fileproto.DecodeFileComplete(fr.Payload)
+				if c.Err != "" {
+					msg := "download: " + c.Err
+					if c.ErrDetail != "" {
+						msg = msg + " (" + c.ErrDetail + ")"
+					}
+					return mcpErrorResult(errcode.New(c.Err, msg)), nil
+				}
+				meta := map[string]any{
+					"size":     c.Size,
+					"sha256":   c.Sha256,
+					"src_path": args.SrcPath,
+				}
+				var text string
+				if args.DestPath != "" {
+					meta["dest_path"] = args.DestPath
+					text = fmt.Sprintf("downloaded %d bytes to %s (sha256=%s)", c.Size, args.DestPath, c.Sha256)
+				} else if utf8.Valid(content) {
+					text = string(content)
+				} else {
+					meta["content_b64"] = base64.StdEncoding.EncodeToString(content)
+					text = fmt.Sprintf("(binary %d bytes, sha256=%s)", c.Size, c.Sha256)
+				}
+				return map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": text}},
+					"_meta":   meta,
+				}, nil
+			case proto.FrameTypeError:
+				code, detail := errcode.DecodeFramePayload(fr.Payload)
+				msg := "download: " + code
+				if detail != "" {
+					msg = msg + " (" + detail + ")"
+				}
+				return mcpErrorResult(errcode.New(code, msg)), nil
+			}
+		}
 	}
 }
 

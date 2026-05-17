@@ -280,6 +280,14 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleListDir(ctx, inner)
 	case proto.FrameTypeStatRequest:
 		go s.handleStat(ctx, inner)
+	case proto.FrameTypeUploadRequest:
+		// chunks source needs the writeSlot pre-registered so chunks
+		// that arrive concurrently can be delivered. URL source ignores
+		// it but harmless to allocate.
+		slot := s.beginWrite(inner.ReqID)
+		go s.handleUpload(ctx, inner, slot)
+	case proto.FrameTypeDownloadRequest:
+		go s.handleDownload(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
@@ -489,6 +497,57 @@ func (s *daemonState) handleStat(ctx context.Context, inner proto.Frame) {
 	resp := tools.Stat(req, s.cfg.AllowedReadPaths)
 	payload, _ := resp.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleUpload(ctx context.Context, inner proto.Frame, slot *writeSlot) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.writes, inner.ReqID)
+		s.mu.Unlock()
+	}()
+	req, err := fileproto.DecodeUploadRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	var complete fileproto.FileComplete
+	switch req.Source {
+	case "chunks":
+		next := func() (fileproto.FileChunk, error) {
+			select {
+			case c := <-slot.inbound:
+				return c, nil
+			case <-ctx.Done():
+				return fileproto.FileChunk{}, ctx.Err()
+			}
+		}
+		complete, _ = tools.UploadChunks(ctx, req, s.cfg.AllowedWritePaths, next)
+	case "url":
+		complete, _ = tools.UploadURL(ctx, req, s.cfg.AllowedWritePaths)
+	default:
+		complete = fileproto.FileComplete{
+			Err:       "bad_payload",
+			ErrDetail: "source must be 'chunks' or 'url', got " + req.Source,
+		}
+	}
+	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
+	req, err := fileproto.DecodeDownloadRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can
+	// flow. AllowedReadPaths is the gate, same as read_file.
+	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit}
+	onChunk := func(c fileproto.FileChunk) {
+		payload, _ := c.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
+	}
+	complete, _ := tools.ReadFile(ctx, rdReq, s.cfg.AllowedReadPaths, tools.UploadMaxBytes, onChunk)
+	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
 func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
