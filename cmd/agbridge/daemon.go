@@ -18,6 +18,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/e2e"
+	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
@@ -424,10 +425,12 @@ func (s *daemonState) handleExec(ctx context.Context, inner proto.Frame) {
 	complete, runErr := tools.Exec(ctx, req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist, onChunk)
 	if runErr != nil {
 		code := "exec_failed"
+		detail := ""
 		if runErr == tools.ErrCwdForbidden {
 			code = "path_forbidden"
+			detail = "cwd not in allowed_exec_cwds; allowed: " + sandbox.FormatAllowlist(s.cfg.AllowedExecCwds)
 		}
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: inner.ReqID, Payload: []byte(code)})
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: inner.ReqID, Payload: errcode.EncodeFramePayload(code, detail)})
 		return
 	}
 	completePayload, _ := complete.Encode()

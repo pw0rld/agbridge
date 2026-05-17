@@ -565,7 +565,12 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 				}
 				return buildExecResult(stdout.String(), stderr.String(), c), nil
 			case proto.FrameTypeError:
-				return mcpErrorResult(errcode.New(string(f.Payload), "daemon error")), nil
+				code, detail := errcode.DecodeFramePayload(f.Payload)
+				msg := "exec: " + code
+				if detail != "" {
+					msg = msg + " (" + detail + ")"
+				}
+				return mcpErrorResult(errcode.New(code, msg)), nil
 			}
 		}
 	}
