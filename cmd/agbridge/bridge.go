@@ -614,24 +614,58 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 }
 
 func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
-	text := fmt.Sprintf("exitcode=%d duration_ms=%d\n--- stdout ---\n%s--- stderr ---\n%s",
-		c.ExitCode, c.DurationMs, stdout, stderr)
+	meta := map[string]any{
+		"exitcode":    c.ExitCode,
+		"duration_ms": c.DurationMs,
+		"timed_out":   c.TimedOut,
+		"truncated":   c.Truncated,
+	}
+	// Surface raw UTF-8 strings when possible so AI agents read fields
+	// directly without base64 decode. Keep _b64 variants as fallback for
+	// binary output and existing consumers.
+	stdoutUTF8 := utf8.ValidString(stdout)
+	stderrUTF8 := utf8.ValidString(stderr)
+	if stdoutUTF8 {
+		meta["stdout"] = stdout
+	}
+	if stderrUTF8 {
+		meta["stderr"] = stderr
+	}
+	meta["stdout_b64"] = base64.StdEncoding.EncodeToString([]byte(stdout))
+	meta["stderr_b64"] = base64.StdEncoding.EncodeToString([]byte(stderr))
+
+	// content[0].text: prioritize stdout (the usual interest) and only fall
+	// through to stderr when stdout is empty. Non-zero exitcode prepends a
+	// short status line so AI agents notice failures without parsing _meta.
+	var text string
+	body := stdout
+	if !stdoutUTF8 {
+		body = fmt.Sprintf("(stdout: %d binary bytes — see _meta.stdout_b64)", len(stdout))
+	}
+	if body == "" && stderr != "" {
+		body = stderr
+		if !stderrUTF8 {
+			body = fmt.Sprintf("(stderr: %d binary bytes — see _meta.stderr_b64)", len(stderr))
+		}
+	}
+	if c.ExitCode != 0 {
+		text = fmt.Sprintf("exitcode=%d duration_ms=%d\n%s", c.ExitCode, c.DurationMs, body)
+		if stderr != "" && stderrUTF8 && stdout != "" {
+			text += "\n--- stderr ---\n" + stderr
+		}
+	} else {
+		text = body
+	}
+
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
-		"_meta": map[string]any{
-			"exitcode":    c.ExitCode,
-			"duration_ms": c.DurationMs,
-			"timed_out":   c.TimedOut,
-			"truncated":   c.Truncated,
-			"stdout_b64":  base64.StdEncoding.EncodeToString([]byte(stdout)),
-			"stderr_b64":  base64.StdEncoding.EncodeToString([]byte(stderr)),
-		},
+		"_meta":   meta,
 	}
 	if c.TimedOut {
 		result["isError"] = true
 		errMeta := errcode.New("exec_timeout", "subprocess exceeded timeout_ms").ToMCPMeta()
 		for k, v := range metaToMap(errMeta) {
-			result["_meta"].(map[string]any)[k] = v
+			meta[k] = v
 		}
 	}
 	return result
