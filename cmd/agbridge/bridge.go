@@ -173,6 +173,29 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.portForwardHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
+				Name: "port_forward_list",
+				Description: "List active port-forwards established by this bridge. " +
+					"Returns [{local_port, remote_host, remote_port, opened_at}].",
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			}, rt.portForwardListHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "port_forward_close",
+				Description: "Close a single port-forward by local_port. The local " +
+					"TCP listener is shut down; in-flight connections drain.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"local_port": map[string]any{"type": "integer"},
+					},
+					"required": []string{"local_port"},
+				},
+			}, rt.portForwardCloseHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
 				Name: "list_directory",
 				Description: "List immediate children of a directory on the remote " +
 					"daemon machine. Non-recursive. Returns [{name, type, size, mode, " +
@@ -279,15 +302,28 @@ type router struct {
 	session   *e2e.Session // active E2E session (nil before handshake / after disconnect)
 	sessionID [8]byte      // bound to session
 	pending   map[string]chan proto.Frame
+	forwards  map[int]*activeForward // local_port -> forward
+}
+
+// activeForward tracks one live port_forward bound on the bridge side so
+// the lifecycle tools (port_forward_list / port_forward_close) can
+// inspect and tear it down without restarting the bridge.
+type activeForward struct {
+	LocalPort  int       `json:"local_port"`
+	RemoteHost string    `json:"remote_host"`
+	RemotePort int       `json:"remote_port"`
+	OpenedAt   int64     `json:"opened_at"` // unix seconds
+	ln         net.Listener
 }
 
 func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte, cfg *config.BridgeConfig) (*router, error) {
 	r := &router{
-		ctx:     ctx,
-		conn:    conn,
-		apiKey:  apiKey,
-		e2eMode: cfg.E2EMode,
-		pending: make(map[string]chan proto.Frame),
+		ctx:      ctx,
+		conn:     conn,
+		apiKey:   apiKey,
+		e2eMode:  cfg.E2EMode,
+		pending:  make(map[string]chan proto.Frame),
+		forwards: make(map[int]*activeForward),
 	}
 	if cfg.E2EMode != "disabled" {
 		sk, err := e2e.LoadStatic(cfg.BridgeStaticKeyPath)
@@ -899,13 +935,90 @@ func (r *router) portForwardHandler(ctx context.Context, raw json.RawMessage) (a
 		return mcpErrorResult(errcode.New("listen_failed", err.Error())), nil
 	}
 	tcpAddr := ln.Addr().(*net.TCPAddr)
+	fwd := &activeForward{
+		LocalPort:  tcpAddr.Port,
+		RemoteHost: args.RemoteHost,
+		RemotePort: args.RemotePort,
+		OpenedAt:   time.Now().Unix(),
+		ln:         ln,
+	}
+	r.mu.Lock()
+	r.forwards[tcpAddr.Port] = fwd
+	r.mu.Unlock()
 	go r.portForwardAcceptLoop(ctx, ln, args.RemoteHost, args.RemotePort)
+	go func() {
+		<-ctx.Done()
+		r.mu.Lock()
+		delete(r.forwards, tcpAddr.Port)
+		r.mu.Unlock()
+	}()
 	text := fmt.Sprintf("listening on %s:%d → %s:%d", portForwardListenHost, tcpAddr.Port, args.RemoteHost, args.RemotePort)
 	return map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"_meta": map[string]any{
 			"local_host": portForwardListenHost,
 			"local_port": tcpAddr.Port,
+		},
+	}, nil
+}
+
+func (r *router) portForwardListHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	r.mu.Lock()
+	out := make([]activeForward, 0, len(r.forwards))
+	for _, f := range r.forwards {
+		out = append(out, activeForward{
+			LocalPort:  f.LocalPort,
+			RemoteHost: f.RemoteHost,
+			RemotePort: f.RemotePort,
+			OpenedAt:   f.OpenedAt,
+		})
+	}
+	r.mu.Unlock()
+	var b strings.Builder
+	for _, f := range out {
+		b.WriteString(fmt.Sprintf("  127.0.0.1:%d → %s:%d (opened %d)\n",
+			f.LocalPort, f.RemoteHost, f.RemotePort, f.OpenedAt))
+	}
+	if b.Len() == 0 {
+		b.WriteString("(no active forwards)")
+	}
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": b.String()}},
+		"_meta":   map[string]any{"forwards": out, "count": len(out)},
+	}, nil
+}
+
+type portForwardCloseArgs struct {
+	LocalPort int `json:"local_port"`
+}
+
+func (r *router) portForwardCloseHandler(_ context.Context, raw json.RawMessage) (any, error) {
+	var args portForwardCloseArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.LocalPort == 0 {
+		return mcpErrorResult(errcode.New("bad_payload", "local_port required")), nil
+	}
+	r.mu.Lock()
+	fwd, ok := r.forwards[args.LocalPort]
+	if ok {
+		delete(r.forwards, args.LocalPort)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return mcpErrorResult(errcode.New("not_found", fmt.Sprintf("no active forward on local_port=%d", args.LocalPort))), nil
+	}
+	_ = fwd.ln.Close()
+	return map[string]any{
+		"content": []any{map[string]any{
+			"type": "text",
+			"text": fmt.Sprintf("closed forward on 127.0.0.1:%d (was → %s:%d)", fwd.LocalPort, fwd.RemoteHost, fwd.RemotePort),
+		}},
+		"_meta": map[string]any{
+			"local_port":  fwd.LocalPort,
+			"remote_host": fwd.RemoteHost,
+			"remote_port": fwd.RemotePort,
 		},
 	}, nil
 }
