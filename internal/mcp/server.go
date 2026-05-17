@@ -16,6 +16,11 @@ import (
 // ProtocolVersion echoed in initialize responses. Bumped as MCP evolves.
 const ProtocolVersion = "2024-11-05"
 
+// Version is the agbridge binary version surfaced in serverInfo. cmd/agbridge
+// overrides this at link time or via init in tests; default catches missed
+// wiring (won't show up in real builds).
+var Version = "0.0.0-unset"
+
 // jsonRPCMessage is the shape of both requests and responses on the wire.
 type jsonRPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -97,7 +102,7 @@ func (s *Server) dispatch(ctx context.Context, req jsonRPCMessage) jsonRPCMessag
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo": map[string]any{"name": "agbridge", "version": "0.0.3"},
+			"serverInfo": map[string]any{"name": "agbridge", "version": Version},
 		})
 	case "tools/list":
 		return okResp(req.ID, s.listTools())
