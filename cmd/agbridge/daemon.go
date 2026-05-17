@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/bgproto"
 	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
@@ -213,6 +214,7 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		e2e:     deps,
 		writes:  make(map[string]*writeSlot),
 		streams: make(map[string]*streamSlot),
+		bgReg:   tools.NewBgRegistry(),
 	}
 	for {
 		f, err := conn.Recv(sessionCtx)
@@ -255,6 +257,7 @@ type daemonState struct {
 	mu      sync.Mutex
 	writes  map[string]*writeSlot
 	streams map[string]*streamSlot
+	bgReg   *tools.BgRegistry
 
 	// Active E2E session. v0.1.0 single-active-session per daemon conn
 	// (v0.0.8 will demux per-bridge by session_id when multi-bridge lands).
@@ -288,6 +291,8 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleUpload(ctx, inner, slot)
 	case proto.FrameTypeDownloadRequest:
 		go s.handleDownload(ctx, inner)
+	case proto.FrameTypeBgExecRequest:
+		go s.handleBgExec(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
@@ -548,6 +553,33 @@ func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
 	}
 	complete, _ := tools.ReadFile(ctx, rdReq, s.cfg.AllowedReadPaths, tools.UploadMaxBytes, onChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+func (s *daemonState) handleBgExec(ctx context.Context, inner proto.Frame) {
+	req, err := bgproto.DecodeBgExecRequest(inner.Payload)
+	if err != nil {
+		payload, _ := bgproto.BgExecResponse{Action: "unknown", Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeBgExecResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	var resp bgproto.BgExecResponse
+	switch req.Action {
+	case "start":
+		resp = s.bgReg.StartBg(req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist)
+	case "status":
+		resp = s.bgReg.Status(req)
+	case "logs":
+		resp = s.bgReg.Logs(req)
+	case "kill":
+		resp = s.bgReg.Kill(req)
+	case "list":
+		resp = s.bgReg.List()
+	default:
+		resp = bgproto.BgExecResponse{Action: req.Action, Err: "bad_payload",
+			ErrDetail: "action must be start|status|logs|kill|list"}
+	}
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeBgExecResponse, ReqID: inner.ReqID, Payload: payload})
 }
 
 func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
