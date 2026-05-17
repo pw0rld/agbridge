@@ -172,6 +172,11 @@ func newBridgeCmd() *cobra.Command {
 				},
 			}, rt.portForwardHandler)
 
+			// Background process management — start/status/logs/kill/list
+			for _, spec := range bgExecTools(rt) {
+				srv.RegisterTool(spec.Spec, spec.Handler)
+			}
+
 			srv.RegisterTool(mcp.ToolSpec{
 				Name: "upload",
 				Description: "Transfer a file to the daemon machine. Two source modes: " +

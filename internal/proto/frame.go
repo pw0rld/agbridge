@@ -67,6 +67,12 @@ const (
 	// upload mode (chunks vs URL) and download offset/limit.
 	FrameTypeUploadRequest   FrameType = 70
 	FrameTypeDownloadRequest FrameType = 71
+
+	// Background process management (v0.3.0+). A single request frame
+	// carries action=start|status|logs|kill|list with action-specific
+	// fields; the response frame mirrors the action plus result fields.
+	FrameTypeBgExecRequest  FrameType = 80
+	FrameTypeBgExecResponse FrameType = 81
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific
