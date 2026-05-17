@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
 )
@@ -153,6 +155,85 @@ func TestEditFileWritesBackup(t *testing.T) {
 	cur, _ := os.ReadFile(path)
 	if !strings.Contains(string(cur), "MODIFIED") {
 		t.Errorf("primary file not edited: %s", cur)
+	}
+}
+
+func TestEditFileBackupGCKeepsOnlyN(t *testing.T) {
+	// Successive edits should retain at most BackupRetainCount=5 .bak files.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.txt")
+	_ = os.WriteFile(path, []byte("v0"), 0o644)
+	allow := []string{dir + "/*"}
+
+	for i := 0; i < 10; i++ {
+		old := fmt.Sprintf("v%d", i)
+		nw := fmt.Sprintf("v%d", i+1)
+		complete, err := EditFile(context.Background(),
+			fileproto.FileEditRequest{Path: path, OldString: old, NewString: nw},
+			allow, 1<<20)
+		if err != nil {
+			t.Fatalf("edit %d: %v", i, err)
+		}
+		if complete.Err != "" {
+			t.Fatalf("edit %d err: %q", i, complete.Err)
+		}
+		// Sleep a hair so mtimes are distinct (POSIX nanosecond res not
+		// always reliable, especially on tmpfs).
+		time.Sleep(2 * time.Millisecond)
+	}
+	matches, _ := filepath.Glob(path + ".bak.*")
+	if len(matches) != BackupRetainCount {
+		t.Fatalf("expected exactly %d backups after GC, got %d: %v",
+			BackupRetainCount, len(matches), matches)
+	}
+	// File should be at final v10
+	final, _ := os.ReadFile(path)
+	if string(final) != "v10" {
+		t.Errorf("file should be v10, got %q", final)
+	}
+}
+
+func TestEditFileBackupGCKeepsNewest(t *testing.T) {
+	// After GC, the surviving backups should be the most recent ones —
+	// older ones get deleted.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	_ = os.WriteFile(path, []byte("step-0"), 0o644)
+	allow := []string{dir + "/*"}
+
+	for i := 0; i < 8; i++ {
+		old := fmt.Sprintf("step-%d", i)
+		nw := fmt.Sprintf("step-%d", i+1)
+		_, err := EditFile(context.Background(),
+			fileproto.FileEditRequest{Path: path, OldString: old, NewString: nw},
+			allow, 1<<20)
+		if err != nil {
+			t.Fatalf("edit %d: %v", i, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	matches, _ := filepath.Glob(path + ".bak.*")
+	if len(matches) != BackupRetainCount {
+		t.Fatalf("expected %d, got %d", BackupRetainCount, len(matches))
+	}
+	// Among surviving backups, the contents should cover the LATEST
+	// pre-edit states (step-3 through step-7), not the earliest.
+	versions := map[string]bool{}
+	for _, m := range matches {
+		body, _ := os.ReadFile(m)
+		versions[string(body)] = true
+	}
+	// The first 3 pre-edit states (step-0, step-1, step-2) should have been GC'd.
+	for _, gone := range []string{"step-0", "step-1", "step-2"} {
+		if versions[gone] {
+			t.Errorf("expected %q to be GC'd, but it survived", gone)
+		}
+	}
+	// The last few (step-5..step-7) must survive.
+	for _, kept := range []string{"step-5", "step-6", "step-7"} {
+		if !versions[kept] {
+			t.Errorf("expected %q to survive GC, but it was deleted", kept)
+		}
 	}
 }
 
