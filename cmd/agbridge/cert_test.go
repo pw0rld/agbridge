@@ -29,11 +29,15 @@ func TestCertGenHumanOutput(t *testing.T) {
 
 	certPath := filepath.Join(out, "cert.pem")
 	keyPath := filepath.Join(out, "key.pem")
+	pinPath := filepath.Join(out, "pin.txt")
 	if _, err := os.Stat(certPath); err != nil {
 		t.Fatalf("cert.pem missing: %v", err)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("key.pem missing: %v", err)
+	}
+	if _, err := os.Stat(pinPath); err != nil {
+		t.Fatalf("pin.txt missing: %v", err)
 	}
 	certPEM, _ := os.ReadFile(certPath)
 	gotPin, err := pki.PinFromCertPEM(certPEM)
@@ -42,6 +46,11 @@ func TestCertGenHumanOutput(t *testing.T) {
 	}
 	if !strings.Contains(string(stdout), gotPin) {
 		t.Errorf("stdout pin doesn't match on-disk pin %q", gotPin)
+	}
+	// pin.txt content must match the computed pin (newline-terminated)
+	pinBytes, _ := os.ReadFile(pinPath)
+	if strings.TrimSpace(string(pinBytes)) != gotPin {
+		t.Errorf("pin.txt content %q != computed pin %q", string(pinBytes), gotPin)
 	}
 }
 
