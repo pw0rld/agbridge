@@ -992,11 +992,20 @@ func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any,
 				}
 				return mcpErrorResult(errcode.New(c.Err, msg)), nil
 			}
+			text := fmt.Sprintf("edited %d bytes (sha256=%s)", c.Size, c.Sha256)
+			if c.BackupPath != "" {
+				text += "\nbackup: " + c.BackupPath
+			}
+			meta := map[string]any{
+				"size":   c.Size,
+				"sha256": c.Sha256,
+			}
+			if c.BackupPath != "" {
+				meta["backup_path"] = c.BackupPath
+			}
 			return map[string]any{
-				"content": []any{map[string]any{
-					"type": "text",
-					"text": fmt.Sprintf("edited %d bytes (sha256=%s)", c.Size, c.Sha256),
-				}},
+				"content": []any{map[string]any{"type": "text", "text": text}},
+				"_meta":   meta,
 			}, nil
 		case proto.FrameTypeError:
 			code, detail := errcode.DecodeFramePayload(f.Payload)
