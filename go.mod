@@ -1,6 +1,6 @@
 module github.com/pw0rld/agbridge
 
-go 1.25.9
+go 1.25.10
 
 require (
 	github.com/flynn/noise v1.1.0
