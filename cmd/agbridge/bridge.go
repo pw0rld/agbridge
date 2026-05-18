@@ -14,6 +14,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -89,7 +90,14 @@ func newBridgeCmd() *cobra.Command {
 				os.Exit(0)
 			}()
 
-			go superviseBridgeConn(ctx, rt, cfg, tlsCfg)
+			go func() {
+				err := superviseBridgeConn(ctx, rt, cfg, tlsCfg)
+				if errors.Is(err, errEvicted) {
+					// EX_TEMPFAIL (75) — see errEvicted's doc. systemd
+					// users honour this with RestartPreventExitStatus=75.
+					os.Exit(75)
+				}
+			}()
 
 			srv := mcp.NewServer()
 			srv.RegisterTool(mcp.ToolSpec{
@@ -373,7 +381,29 @@ type router struct {
 	sessionID [8]byte      // bound to session
 	pending   map[string]chan proto.Frame
 	forwards  map[int]*activeForward // local_port -> forward
+
+	// evicted is set when the gateway tells us a newer bridge with the
+	// same identity has taken over (errFrame "session_replaced"). The
+	// supervisor checks this on each runReader return to decide whether
+	// to reconnect or exit — reconnecting in this case would just kick
+	// the new bridge out and loop forever (F7 kick-storm).
+	evicted atomic.Bool
 }
+
+// markIfEvicted flips the evicted flag if f is the gateway's eviction
+// signal. Returns true if it matched.
+func (r *router) markIfEvicted(f proto.Frame) bool {
+	if f.Type == proto.FrameTypeError && string(f.Payload) == "session_replaced" {
+		r.evicted.Store(true)
+		return true
+	}
+	return false
+}
+
+// wasEvicted reports whether this router has ever been displaced by a
+// newer bridge with the same identity. Once set, it stays set — there is
+// no recovery path; the supervisor must exit.
+func (r *router) wasEvicted() bool { return r.evicted.Load() }
 
 // activeForward tracks one live port_forward bound on the bridge side so
 // the lifecycle tools (port_forward_list / port_forward_close) can
@@ -597,22 +627,41 @@ func bridgeDialAndAttach(ctx context.Context, rt *router, cfg *config.BridgeConf
 	return nil
 }
 
+// errEvicted is returned by superviseBridgeConn when the gateway has told
+// us a newer bridge with the same identity has taken over. The caller in
+// runBridgeCommand exits the process with code 75 (EX_TEMPFAIL) so that
+// process supervisors (systemd, MCP clients) can distinguish "evicted —
+// don't restart" from "crashed — please restart". systemd users should
+// set RestartPreventExitStatus=75 to honor this.
+var errEvicted = errors.New("bridge evicted by newer instance with same identity")
+
 // superviseBridgeConn runs rt.runReader to completion (blocks until the
-// current conn dies), then loops via dialer.Loop to re-dial + re-handshake +
-// re-attach. In-flight tool calls are signalled via replaceConn(nil) so they
-// return network_lost(retryable=true). Exits when ctx cancels.
-func superviseBridgeConn(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) {
+// current conn dies), then loops via dialer.Loop to re-dial + re-handshake
+// + re-attach. In-flight tool calls are signalled via replaceConn(nil) so
+// they return network_lost(retryable=true).
+//
+// Returns:
+//   - errEvicted if the gateway sent session_replaced (newer bridge took
+//     over with the same identity — must NOT reconnect, that would kick
+//     the new bridge back out and storm)
+//   - ctx.Err() if the caller cancelled (clean shutdown)
+//   - the dialer error if reconnection ultimately failed
+func superviseBridgeConn(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) error {
 	for {
 		rt.runReader()
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
+		}
+		if rt.wasEvicted() {
+			fmt.Fprintln(os.Stderr, "bridge: evicted by newer instance with same identity — exiting")
+			return errEvicted
 		}
 		fmt.Fprintln(os.Stderr, "bridge: connection lost, reconnecting…")
 		rt.replaceConn(nil)
 		if err := dialer.Loop(ctx, func(c context.Context) error {
 			return bridgeDialAndAttach(c, rt, cfg, tlsCfg)
 		}, dialer.Options{}); err != nil {
-			return
+			return err
 		}
 		fmt.Fprintln(os.Stderr, "bridge: reconnected")
 	}
@@ -633,6 +682,13 @@ func (r *router) runReader() {
 		f, err := conn.Recv(r.ctx)
 		if err != nil {
 			return
+		}
+		if r.markIfEvicted(f) {
+			// Set the flag and keep reading; the gateway is about to
+			// close the conn, so the next Recv will return and the
+			// supervisor will see wasEvicted and exit instead of
+			// reconnecting.
+			continue
 		}
 		if f.Type != proto.FrameTypeRoute {
 			continue

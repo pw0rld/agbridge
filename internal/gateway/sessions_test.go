@@ -92,3 +92,78 @@ func TestSessionTableRegisterReleaseFreesSlot(t *testing.T) {
 		t.Errorf("Count = %d after release, want 0", st.Count())
 	}
 }
+
+func TestSessionTableReplaceByRoleNameReturnsOld(t *testing.T) {
+	// Contract: ReplaceByRoleName drops the old session from the table and
+	// returns the old conn, but does NOT Close it. The caller (handleBridge)
+	// needs a window to send a session_replaced error frame before closing,
+	// so closing inside the table would race with that send.
+	st := NewSessionTable()
+
+	oldConn := &fakeConn{}
+	newConn := &fakeConn{}
+
+	_, rOld := st.Register(&Session{Role: "bridge", Name: "alice", KeyHash: "k1", Conn: oldConn})
+	_ = rOld
+
+	replaced, _, rNew := st.ReplaceByRoleName(&Session{
+		Role: "bridge", Name: "alice", KeyHash: "k1", Conn: newConn,
+	})
+	defer rNew()
+
+	if replaced != oldConn {
+		t.Errorf("expected old conn to be returned as replaced")
+	}
+	if oldConn.IsClosed() {
+		t.Errorf("ReplaceByRoleName must NOT close old conn — caller does after sending error frame")
+	}
+	if newConn.IsClosed() {
+		t.Errorf("new conn should NOT be closed")
+	}
+	if st.Count() != 1 {
+		t.Errorf("after replace, exactly 1 session should remain, got %d", st.Count())
+	}
+}
+
+func TestSessionTableReplaceByRoleNameNoMatch(t *testing.T) {
+	st := NewSessionTable()
+	newConn := &fakeConn{}
+	replaced, _, rel := st.ReplaceByRoleName(&Session{
+		Role: "bridge", Name: "fresh", KeyHash: "k", Conn: newConn,
+	})
+	defer rel()
+	if replaced != nil {
+		t.Errorf("no existing session should mean replaced=nil, got %v", replaced)
+	}
+	if newConn.IsClosed() {
+		t.Errorf("new conn should NOT be closed on first registration")
+	}
+	if st.Count() != 1 {
+		t.Errorf("expected 1 session, got %d", st.Count())
+	}
+}
+
+func TestSessionTableReplaceDifferentRolesCoexist(t *testing.T) {
+	// A bridge named "x" and a daemon named "x" must NOT shadow each
+	// other — Role discriminates.
+	st := NewSessionTable()
+	bridgeConn := &fakeConn{}
+	daemonConn := &fakeConn{}
+
+	_, rB := st.Register(&Session{Role: "bridge", Name: "x", KeyHash: "kb", Conn: bridgeConn})
+	defer rB()
+
+	replaced, _, rD := st.ReplaceByRoleName(&Session{
+		Role: "daemon", Name: "x", KeyHash: "kd", Conn: daemonConn,
+	})
+	defer rD()
+	if replaced != nil {
+		t.Errorf("bridge/x should not be replaced by daemon/x: got %v", replaced)
+	}
+	if bridgeConn.IsClosed() {
+		t.Errorf("bridge conn was incorrectly closed by daemon replace")
+	}
+	if st.Count() != 2 {
+		t.Errorf("expected 2 sessions coexisting, got %d", st.Count())
+	}
+}
