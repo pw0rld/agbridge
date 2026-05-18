@@ -111,6 +111,84 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 	}
 }
 
+// TestBridgeDuplicateIdentitySendsSessionReplaced verifies F7: when a
+// second bridge with the same (name, api_key) connects, the gateway sends
+// a session_replaced error frame to the older bridge before closing its
+// conn. Without this signal the older bridge's supervisor would
+// auto-reconnect and enter a kick-storm with the newer instance.
+func TestBridgeDuplicateIdentitySendsSessionReplaced(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := audit.Open(filepath.Join(t.TempDir(), "a.jsonl"))
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer w.Close()
+	cfg := newTestConfig(t)
+	inst, err := Run(ctx, srvCfg, cfg, w)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
+
+	// Bring up a daemon so the bridges' handleBridge stays in its read
+	// loop (without one, both would early-exit with daemon_offline before
+	// the replace path is exercised).
+	daemonConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	defer daemonConn.Close()
+	sendHello(t, ctx, daemonConn, handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1"})
+	if ack, err := daemonConn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon hello ack: %v %v", err, ack.Type)
+	}
+
+	// Bridge A — first to arrive.
+	bridgeA, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("bridgeA dial: %v", err)
+	}
+	defer bridgeA.Close()
+	sendHello(t, ctx, bridgeA, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
+	if ack, err := bridgeA.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridgeA hello ack: %v %v", err, ack.Type)
+	}
+
+	// Bridge B — same identity, displaces A.
+	bridgeB, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("bridgeB dial: %v", err)
+	}
+	defer bridgeB.Close()
+	sendHello(t, ctx, bridgeB, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
+	if ack, err := bridgeB.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridgeB hello ack: %v %v", err, ack.Type)
+	}
+
+	// A must receive a session_replaced error frame, then its conn must
+	// close. Allow a generous deadline so the test isn't flaky on slow CI.
+	deadline, dcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer dcancel()
+	f, err := bridgeA.Recv(deadline)
+	if err != nil {
+		t.Fatalf("bridgeA recv: %v", err)
+	}
+	if f.Type != proto.FrameTypeError {
+		t.Fatalf("bridgeA got frame type %v, want Error", f.Type)
+	}
+	if string(f.Payload) != "session_replaced" {
+		t.Errorf("bridgeA error payload = %q, want session_replaced", string(f.Payload))
+	}
+
+	// Subsequent Recv should fail (conn closed by gateway).
+	_, err = bridgeA.Recv(deadline)
+	if err == nil {
+		t.Errorf("bridgeA conn should be closed after session_replaced; Recv returned no error")
+	}
+}
+
 func TestBridgePingRoutesToDaemon(t *testing.T) {
 	srvCfg, cliCfg := testcerts.MustGenerate(t)
 	ctx, cancel := context.WithCancel(context.Background())
