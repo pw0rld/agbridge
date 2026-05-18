@@ -102,8 +102,10 @@ func Search(req searchproto.SearchRequest, allowedPaths []string) searchproto.Se
 		}
 	}
 
+	// Initialize to empty slice (not nil) so JSON marshals as [] instead
+	// of null — friendlier for clients that always do `for m in results`.
+	results := make([]searchproto.SearchMatch, 0)
 	var (
-		results      []searchproto.SearchMatch
 		totalMatches int
 		filesSeen    int
 		stoppedEarly bool
