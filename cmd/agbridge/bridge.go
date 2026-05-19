@@ -388,6 +388,14 @@ type router struct {
 	// to reconnect or exit — reconnecting in this case would just kick
 	// the new bridge out and loop forever (F7 kick-storm).
 	evicted atomic.Bool
+
+	// sendMu serializes Encrypt + WSS Send so nonce consumption matches
+	// wire order. noise.CipherState.Encrypt is not concurrent-safe, and
+	// encrypting outside the WSS write lock would let goroutines reorder
+	// ciphertexts on the wire — the receiver's monotone recv counter
+	// would desync permanently. See F4 root cause and
+	// internal/e2e/session_concurrent_test.go.
+	sendMu sync.Mutex
 }
 
 // markIfEvicted flips the evicted flag if f is the gateway's eviction
@@ -486,6 +494,12 @@ func (r *router) sendInner(ctx context.Context, inner proto.Frame) error {
 	if err != nil {
 		return err
 	}
+
+	// Encrypt + WSS Send must be a single critical section so nonce
+	// consumption matches wire order. See sendMu comment on router.
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+
 	r.mu.Lock()
 	sess := r.session
 	sid := r.sessionID
