@@ -1205,6 +1205,19 @@ func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host stri
 	for {
 		select {
 		case <-ackCtx.Done():
+			// Daemon didn't ack within the window — its handleStreamOpen
+			// is presumably stuck (slow dial, target overloaded, …) and
+			// its slot is still registered. Send StreamClose so the
+			// daemon can cancel its streamCtx and release the local
+			// TCP socket; otherwise the goroutine + fd leak on every
+			// stalled stream. Use context.Background() because the
+			// outer ctx may have been cancelled.
+			closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
+			_ = r.sendInner(context.Background(), proto.Frame{
+				Type:    proto.FrameTypeStreamClose,
+				ReqID:   streamID,
+				Payload: closePayload,
+			})
 			return
 		case f, ok := <-ch:
 			if !ok {
