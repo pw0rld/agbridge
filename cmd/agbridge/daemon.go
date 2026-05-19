@@ -265,6 +265,14 @@ type daemonState struct {
 	sessionMu sync.Mutex
 	session   *e2e.Session
 	sessionID [8]byte
+
+	// sendMu serializes Encrypt + WSS Send so nonce consumption matches
+	// wire order. noise.CipherState.Encrypt is not concurrent-safe, and
+	// even if it were, encrypting outside the WSS write lock would let
+	// goroutines reorder ciphertexts on the wire — the receiver's
+	// monotone recv counter would desync permanently. See F4 root cause
+	// and internal/e2e/session_concurrent_test.go.
+	sendMu sync.Mutex
 }
 
 func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
@@ -319,6 +327,12 @@ func (s *daemonState) sendInner(ctx context.Context, inner proto.Frame) {
 	if err != nil {
 		return
 	}
+
+	// Encrypt + WSS Send must be a single critical section so nonce
+	// consumption matches wire order. See sendMu comment on daemonState.
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
 	s.sessionMu.Lock()
 	sess := s.session
 	sid := s.sessionID
