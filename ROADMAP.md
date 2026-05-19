@@ -44,6 +44,15 @@ AI-UX improvements + bug fixes from stress and integration testing.
   gap between bursts, subsequent rounds also succeed at 80%+. A
   back-to-back burst (no gap) still degrades after round 1 — a
   separate cleanup-window issue tracked as F4b below.
+- **F4b.1 defensive cleanup — bridge sends StreamClose on
+  ackCtx timeout.** When the daemon never returns StreamAck within
+  `streamAckTimeout`, the bridge used to return without telling the
+  daemon, leaking the daemon's `handleStreamOpen` goroutine + local
+  TCP socket forever. Fix: send a `StreamClose` (background ctx) on
+  the ack-timeout path so the daemon can cancel its streamCtx and
+  release the fd. Hygiene only — does not fully resolve the
+  back-to-back burst symptom (F4b), but stops the goroutine/fd leak
+  that contributes to it.
 
 ## Next up
 
