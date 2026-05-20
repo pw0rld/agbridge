@@ -105,7 +105,9 @@ func newBridgeCmd() *cobra.Command {
 			srv := mcp.NewServer()
 			srv.RegisterTool(mcp.ToolSpec{
 				Name:        "exec",
-				Description: "Run a command on the remote daemon machine and return stdout/stderr/exitcode.",
+				Description: "Run a command on the remote daemon machine and return stdout/stderr/exitcode. " +
+					"stdout/stderr are emitted as plain text (`stdout`, `stderr` in _meta) when valid " +
+					"UTF-8; as base64 (`stdout_b64`, `stderr_b64`) otherwise — never both.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
