@@ -749,3 +749,27 @@ func runFakeDaemon(ctx context.Context, conn *wss.Conn, cfg *config.DaemonConfig
 		state.dispatch(ctx, inner)
 	}
 }
+
+// TestSmokePhase6NoProgressTokenSilent asserts that handlers stay
+// silent when the client omits _meta.progressToken. F6 must not
+// regress backwards compatibility for clients that don't opt in.
+func TestSmokePhase6NoProgressTokenSilent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "small.txt")
+	content := bytes.Repeat([]byte{0x45}, 2*1024*1024) // 2 MiB
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	// callTool (NOT callToolWithProgress) does not pass progressToken.
+	// It expects exactly 2 lines (initialize + result). If any progress
+	// notifications leaked through, callTool would fail the
+	// `len(lines) != 2` check.
+	res := callTool(t, env, "read_file", map[string]any{"path": path})
+	if res == nil {
+		t.Fatal("nil result")
+	}
+}
