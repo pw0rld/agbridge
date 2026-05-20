@@ -171,6 +171,81 @@ func callTool(t *testing.T, env *phase4Env, name string, args map[string]any) ma
 	return res
 }
 
+// progressEvent captures one notifications/progress payload as parsed
+// from the MCP stdout stream. message and hasTotal are present so
+// tests can assert the F6 design's "progress=bytes, no total, no
+// message" semantics.
+type progressEvent struct {
+	progress float64
+	hasTotal bool
+	total    float64
+	message  string
+}
+
+// callToolWithProgress drives one tools/call with `_meta.progressToken`
+// set, parses any notifications/progress events that arrive before
+// the final result, and returns both. Fails the test on transport /
+// unmarshal errors.
+func callToolWithProgress(t *testing.T, env *phase4Env, name string, args map[string]any, token string) (map[string]any, []progressEvent) {
+	t.Helper()
+	argsJSON, _ := json.Marshal(args)
+	in := strings.NewReader(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":%q,"arguments":%s,"_meta":{"progressToken":%q}}}`+"\n",
+		name, string(argsJSON), token,
+	))
+	var out bytes.Buffer
+	doneCh := make(chan struct{})
+	go func() {
+		_ = env.srv.Serve(env.ctx, in, &out)
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("server did not return in time; output so far: %s", out.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines (initialize result + tools/call result), got %d: %v", len(lines), lines)
+	}
+
+	var events []progressEvent
+	var result map[string]any
+	for _, line := range lines {
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		if method, ok := msg["method"].(string); ok && method == "notifications/progress" {
+			params, _ := msg["params"].(map[string]any)
+			ev := progressEvent{}
+			if p, ok := params["progress"].(float64); ok {
+				ev.progress = p
+			}
+			if tot, ok := params["total"].(float64); ok {
+				ev.hasTotal = true
+				ev.total = tot
+			}
+			if m, ok := params["message"].(string); ok {
+				ev.message = m
+			}
+			events = append(events, ev)
+			continue
+		}
+		if res, ok := msg["result"].(map[string]any); ok {
+			// The initialize result also has shape {"result":...}; take
+			// the last one — that's tools/call.
+			result = res
+		}
+	}
+	if result == nil {
+		t.Fatalf("no tools/call result found in output:\n%s", out.String())
+	}
+	return result, events
+}
+
 func TestSmokePhase3ExecEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
