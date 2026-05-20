@@ -560,6 +560,52 @@ func TestSmokePhase5InflightCallReturnsNetworkLost(t *testing.T) {
 	}
 }
 
+// TestSmokePhase6ReadFileProgress asserts F6: read_file emits one
+// notifications/progress per FileChunk, with monotone byte-count
+// progress, no total, no message. Uses a ~3 MiB file to guarantee
+// multiple 1 MiB chunks.
+func TestSmokePhase6ReadFileProgress(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "big.bin")
+	const size = 3*1024*1024 + 17 // 3 MiB + a tail, ensures >= 4 chunks
+	content := bytes.Repeat([]byte{0x41}, size)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res, events := callToolWithProgress(t, env, "read_file",
+		map[string]any{"path": path}, "tok-read-1")
+
+	if len(events) < 4 {
+		t.Fatalf("expected >= 4 progress events for 3MiB+17 file, got %d", len(events))
+	}
+	// Monotone progress in bytes.
+	var prev float64
+	for i, ev := range events {
+		if ev.progress <= prev && i > 0 {
+			t.Errorf("event %d: progress %v not strictly increasing from %v", i, ev.progress, prev)
+		}
+		if ev.hasTotal {
+			t.Errorf("event %d: total set; F6 spec says omit total", i)
+		}
+		if ev.message != "" {
+			t.Errorf("event %d: message %q; F6 spec says omit message", i, ev.message)
+		}
+		prev = ev.progress
+	}
+	if int(prev) != size {
+		t.Errorf("final progress = %v, want %d (file size)", prev, size)
+	}
+	// And the result itself still arrives correctly.
+	meta := res["_meta"].(map[string]any)
+	if int(meta["size"].(float64)) != size {
+		t.Errorf("result size = %v, want %d", meta["size"], size)
+	}
+}
+
 func readFull(c net.Conn, p []byte) (int, error) {
 	total := 0
 	for total < len(p) {

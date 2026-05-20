@@ -914,6 +914,8 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
+	emit := mcp.EmitterFromContext(ctx)
+	var bytesReceived int64
 	var content []byte
 	for {
 		select {
@@ -933,6 +935,10 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 					return mcpErrorResult(errcode.New("exceeds_max_size", "file exceeds 10 MB cap")), nil
 				}
 				content = append(content, c.Data...)
+				if len(c.Data) > 0 {
+					bytesReceived += int64(len(c.Data))
+					emit(float64(bytesReceived), nil, "")
+				}
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(f.Payload)
 				return buildReadFileResult(content, c), nil
