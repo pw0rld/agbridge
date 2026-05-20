@@ -42,7 +42,10 @@ import (
 	"path/filepath"
 )
 
-const maxBufferedOutput = 10 << 20
+// maxBufferedOutput is the inline content cap for read_file and
+// download (without dest_path). var (not const) so smoke tests can
+// lower it; do not mutate at runtime in production.
+var maxBufferedOutput int64 = 10 << 20
 
 var errNoConn = errors.New("bridge: no active connection")
 
@@ -795,10 +798,10 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 				if c.Stream == "stderr" {
 					dst = &stderr
 				}
-				if dst.Len()+len(c.Data) > maxBufferedOutput {
-					n := maxBufferedOutput - dst.Len()
+				if int64(dst.Len())+int64(len(c.Data)) > maxBufferedOutput {
+					n := maxBufferedOutput - int64(dst.Len())
 					if n > 0 {
-						dst.Write(c.Data[:n])
+						dst.Write(c.Data[:int(n)])
 					}
 				} else {
 					dst.Write(c.Data)
@@ -926,7 +929,7 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 				if err != nil {
 					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 				}
-				if len(content)+len(c.Data) > maxBufferedOutput {
+				if int64(len(content))+int64(len(c.Data)) > maxBufferedOutput {
 					return mcpErrorResult(errcode.New("exceeds_max_size", "file exceeds 10 MB cap")), nil
 				}
 				content = append(content, c.Data...)
@@ -988,7 +991,7 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	if err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
 	}
-	if len(content) > maxBufferedOutput {
+	if int64(len(content)) > maxBufferedOutput {
 		return mcpErrorResult(errcode.New("exceeds_max_size", "content exceeds 10 MB cap")), nil
 	}
 
