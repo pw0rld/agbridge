@@ -1621,7 +1621,7 @@ func (r *router) downloadHandler(ctx context.Context, raw json.RawMessage) (any,
 						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
 					}
 				} else {
-					if int64(len(content)+len(c.Data)) > maxBufferedOutput {
+					if int64(len(content))+int64(len(c.Data)) > maxBufferedOutput {
 						return mcpErrorResult(errcode.New("exceeds_max_size",
 							"download without dest_path exceeds 10 MB cap; pass dest_path to stream to disk")), nil
 					}
