@@ -675,15 +675,18 @@ func TestSmokePhase6DownloadProgressInline(t *testing.T) {
 // trailing progress event after the cap-trip error. Lowers the
 // bridge cap and raises the daemon cap so the bridge cap trips
 // first.
+//
+// NOTE: mutates package-level vars (maxBufferedOutput, maxFileBytes); must
+// not run in parallel with other tests in this package.
 func TestSmokePhase6DownloadInlineCap(t *testing.T) {
 	origBridgeCap := maxBufferedOutput
 	origDaemonCap := maxFileBytes
-	maxBufferedOutput = 1 << 20  // 1 MiB
-	maxFileBytes = 15 << 20      // 15 MiB
+	maxBufferedOutput = 1 << 20 // 1 MiB
 	t.Cleanup(func() {
 		maxBufferedOutput = origBridgeCap
 		maxFileBytes = origDaemonCap
 	})
+	maxFileBytes = 15 << 20 // 15 MiB
 
 	tmpDir := t.TempDir()
 	src := filepath.Join(tmpDir, "big.bin")
