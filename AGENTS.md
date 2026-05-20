@@ -209,8 +209,10 @@ just ask. Don't silently pick.
 
 ## Things that will surprise you
 
-- **stdout/stderr are base64 in `exec` results** (`stdout_b64` /
-  `stderr_b64`), not plain text. Decode before showing to the user.
+- **`exec` stdout/stderr return as plain text when UTF-8** —
+  read `_meta.stdout` / `_meta.stderr` directly. For binary output
+  (non-UTF-8 bytes) the result has `stdout_b64` / `stderr_b64`
+  instead; exactly one of text or b64 will be present.
 - **Empty `search` matches return `[]`, not `null`** — safe to iterate.
 - **`port_forward` keeps holding the local port** until you call
   `port_forward_close` or the bridge process exits.

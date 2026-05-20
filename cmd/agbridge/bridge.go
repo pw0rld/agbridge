@@ -233,7 +233,10 @@ func newBridgeCmd() *cobra.Command {
 					"locally); `url` — daemon fetches from URL " +
 					"(recommended for content reachable by URL); `chunks` " +
 					"— inline base64 chunks (use only for small binary " +
-					"content the AI must embed inline).",
+					"content the AI must embed inline). " +
+					"Optional `expected_sha256` validates content integrity " +
+					"before commit. Daemon writes atomically via temp + " +
+					"rename. 1 GiB total cap.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
