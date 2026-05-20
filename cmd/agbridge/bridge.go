@@ -993,10 +993,10 @@ func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 }
 
 type writeFileArgs struct {
-	Path       string `json:"path"`
-	Content    string `json:"content"`
-	ContentB64 string `json:"content_b64"`
-	Mode       uint32 `json:"mode"`
+	Path       string  `json:"path"`
+	Content    *string `json:"content"`
+	ContentB64 *string `json:"content_b64"`
+	Mode       uint32  `json:"mode"`
 }
 
 const writeChunkSize = 64 * 1024
@@ -1009,8 +1009,8 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	if args.Path == "" {
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
-	hasContent := args.Content != ""
-	hasB64 := args.ContentB64 != ""
+	hasContent := args.Content != nil
+	hasB64 := args.ContentB64 != nil
 	if hasContent && hasB64 {
 		return mcpErrorResult(errcode.New("bad_payload", "only one of content / content_b64 may be set")), nil
 	}
@@ -1019,10 +1019,10 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	}
 	var content []byte
 	if hasContent {
-		content = []byte(args.Content)
+		content = []byte(*args.Content)
 	} else {
 		var err error
-		content, err = base64.StdEncoding.DecodeString(args.ContentB64)
+		content, err = base64.StdEncoding.DecodeString(*args.ContentB64)
 		if err != nil {
 			return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
 		}

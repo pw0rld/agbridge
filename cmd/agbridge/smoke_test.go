@@ -845,3 +845,57 @@ func TestSmokeF9WriteFileNeitherContentFieldRejected(t *testing.T) {
 		t.Errorf("error_code: got %q want bad_payload", code)
 	}
 }
+
+// TestSmokeF9WriteFileEmptyContent asserts write_file with an explicit
+// empty `content` string creates a zero-byte file (touch-like). The
+// field is present but empty — that's distinct from "not supplied".
+func TestSmokeF9WriteFileEmptyContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "empty.flag")
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":    path,
+		"content": "",
+	})
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("expected success, got error: %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if int64(meta["bytes_written"].(float64)) != 0 {
+		t.Errorf("bytes_written: got %v want 0", meta["bytes_written"])
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("file size: got %d want 0", st.Size())
+	}
+}
+
+// TestSmokeF9WriteFileEmptyContentB64 mirrors the above for the
+// content_b64 path: an explicit empty string is still a valid
+// zero-byte write.
+func TestSmokeF9WriteFileEmptyContentB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "empty-b64.flag")
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":        path,
+		"content_b64": "",
+	})
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("expected success, got error: %+v", res)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("file size: got %d want 0", st.Size())
+	}
+}
