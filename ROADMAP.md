@@ -65,6 +65,24 @@ AI-UX improvements + bug fixes from stress and integration testing.
   daemon changes — `fileproto` untouched. Smoke regressions cover
   progress emission, the inline cap, and the no-progressToken
   silent path.
+- **F9 — AI-friendly tool ergonomics.** Three changes to keep
+  base64 out of AI tool-call traces unless content is genuinely
+  binary. (1) `write_file` accepts `content` (raw string) next to
+  `content_b64`; both set is `bad_payload`, neither set is
+  `bad_payload`; explicit empty-string content writes a zero-byte
+  file (pointer-typed fields distinguish absent from empty). (2)
+  `exec` no longer emits `stdout_b64` / `stderr_b64` when the
+  corresponding text is valid UTF-8 — it emits exactly one of
+  `stdout` (text) or `stdout_b64` (binary). (3) `upload` gains a
+  `local_path` source mode: bridge opens a file on its own disk
+  and streams 1 MiB chunks to the daemon, args carry only two
+  path strings. Tool descriptions and `AGENTS.md` updated with
+  the new decision tree (`edit_file` > `write_file content` >
+  `Write` + `upload local_path` > `upload url` > binary
+  fallbacks). Acceptance test `TestSmokeF9WriteToolBytesComparison`
+  pins the byte savings on a real ~4 KB ASCII fixture: `content`
+  ≈ 15% smaller than `content_b64`, `upload local_path` ≈ 95%
+  smaller. No protocol or daemon changes.
 
 ## Next up
 
