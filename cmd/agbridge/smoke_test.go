@@ -773,3 +773,75 @@ func TestSmokePhase6NoProgressTokenSilent(t *testing.T) {
 		t.Fatal("nil result")
 	}
 }
+
+// TestSmokeF9WriteFileTextContent asserts write_file accepts a raw
+// `content` string and produces a daemon file with the exact bytes.
+func TestSmokeF9WriteFileTextContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "hello.py")
+	content := "from foo import bar\n\nprint('hello, world')\n"
+	wantSha := sha256.Sum256([]byte(content))
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":    path,
+		"content": content,
+	})
+	meta := res["_meta"].(map[string]any)
+	if int64(meta["bytes_written"].(float64)) != int64(len(content)) {
+		t.Errorf("bytes_written: got %v want %d", meta["bytes_written"], len(content))
+	}
+	if got := meta["sha256"].(string); got != hex.EncodeToString(wantSha[:]) {
+		t.Errorf("sha256: got %s want %s", got, hex.EncodeToString(wantSha[:]))
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(onDisk) != content {
+		t.Errorf("on-disk content mismatch: got %q want %q", onDisk, content)
+	}
+}
+
+// TestSmokeF9WriteFileBothContentFieldsRejected asserts that supplying
+// both content and content_b64 returns bad_payload (no silent
+// preference; ambiguous request fails loudly per F9 design).
+func TestSmokeF9WriteFileBothContentFieldsRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":        filepath.Join(tmpDir, "x.txt"),
+		"content":     "raw",
+		"content_b64": base64.StdEncoding.EncodeToString([]byte("raw")),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
+	}
+}
+
+// TestSmokeF9WriteFileNeitherContentFieldRejected asserts that
+// supplying neither content nor content_b64 also returns bad_payload.
+func TestSmokeF9WriteFileNeitherContentFieldRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path": filepath.Join(tmpDir, "x.txt"),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
+	}
+}
