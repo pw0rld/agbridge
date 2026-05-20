@@ -142,16 +142,21 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.readFileHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
-				Name:        "write_file",
-				Description: "Write a file on the remote daemon machine. content_b64 is base64-encoded content.",
+				Name: "write_file",
+				Description: "Write a file on the remote daemon machine. For " +
+					"text content, use `content` (raw string, recommended — " +
+					"saves tokens vs base64). For binary, use `content_b64` " +
+					"(base64). Exactly one of `content` / `content_b64` must " +
+					"be set. 10 MB cap on content size.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":        map[string]any{"type": "string"},
+						"content":     map[string]any{"type": "string"},
 						"content_b64": map[string]any{"type": "string"},
 						"mode":        map[string]any{"type": "integer"},
 					},
-					"required": []string{"path", "content_b64"},
+					"required": []string{"path"},
 				},
 			}, rt.writeFileHandler)
 
@@ -989,6 +994,7 @@ func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 
 type writeFileArgs struct {
 	Path       string `json:"path"`
+	Content    string `json:"content"`
 	ContentB64 string `json:"content_b64"`
 	Mode       uint32 `json:"mode"`
 }
@@ -1003,9 +1009,23 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	if args.Path == "" {
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
-	content, err := base64.StdEncoding.DecodeString(args.ContentB64)
-	if err != nil {
-		return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
+	hasContent := args.Content != ""
+	hasB64 := args.ContentB64 != ""
+	if hasContent && hasB64 {
+		return mcpErrorResult(errcode.New("bad_payload", "only one of content / content_b64 may be set")), nil
+	}
+	if !hasContent && !hasB64 {
+		return mcpErrorResult(errcode.New("bad_payload", "content or content_b64 required")), nil
+	}
+	var content []byte
+	if hasContent {
+		content = []byte(args.Content)
+	} else {
+		var err error
+		content, err = base64.StdEncoding.DecodeString(args.ContentB64)
+		if err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
+		}
 	}
 	if int64(len(content)) > maxBufferedOutput {
 		return mcpErrorResult(errcode.New("exceeds_max_size", "content exceeds 10 MB cap")), nil
