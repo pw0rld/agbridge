@@ -935,6 +935,7 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 					return mcpErrorResult(errcode.New("exceeds_max_size", "file exceeds 10 MB cap")), nil
 				}
 				content = append(content, c.Data...)
+				// Skip emit for EOF sentinels (Data==nil, Eof==true); only data-bearing chunks advance progress.
 				if len(c.Data) > 0 {
 					bytesReceived += int64(len(c.Data))
 					emit(float64(bytesReceived), nil, "")
@@ -1583,6 +1584,9 @@ func (r *router) downloadHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
+	emit := mcp.EmitterFromContext(ctx)
+	var bytesReceived int64
+
 	// If dest_path supplied, stream to local file (no buffering all in
 	// memory). Otherwise buffer and return inline.
 	var (
@@ -1617,7 +1621,16 @@ func (r *router) downloadHandler(ctx context.Context, raw json.RawMessage) (any,
 						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
 					}
 				} else {
+					if int64(len(content)+len(c.Data)) > maxBufferedOutput {
+						return mcpErrorResult(errcode.New("exceeds_max_size",
+							"download without dest_path exceeds 10 MB cap; pass dest_path to stream to disk")), nil
+					}
 					content = append(content, c.Data...)
+				}
+				// Skip emit for EOF sentinels (Data==nil, Eof==true); only data-bearing chunks advance progress.
+				if len(c.Data) > 0 {
+					bytesReceived += int64(len(c.Data))
+					emit(float64(bytesReceived), nil, "")
 				}
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(fr.Payload)

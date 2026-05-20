@@ -131,6 +131,7 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 	srv.RegisterTool(mcp.ToolSpec{Name: "read_file", InputSchema: map[string]any{"type": "object"}}, rt.readFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "write_file", InputSchema: map[string]any{"type": "object"}}, rt.writeFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "port_forward", InputSchema: map[string]any{"type": "object"}}, rt.portForwardHandler)
+	srv.RegisterTool(mcp.ToolSpec{Name: "download", InputSchema: map[string]any{"type": "object"}}, rt.downloadHandler)
 
 	return &phase4Env{ctx: ctx, srv: srv, rt: rt, gatewayURL: u, cliCfg: cliCfg}
 }
@@ -616,6 +617,57 @@ func readFull(c net.Conn, p []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+// TestSmokePhase6DownloadProgressDestPath asserts F6 progress
+// emission for the dest_path branch (chunks streamed to disk).
+func TestSmokePhase6DownloadProgressDestPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "src.bin")
+	dst := filepath.Join(tmpDir, "dst.bin")
+	const size = 3 * 1024 * 1024 // exactly 3 MiB -> 3 chunks
+	content := bytes.Repeat([]byte{0x42}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	_, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src, "dest_path": dst}, "tok-dl-1")
+
+	if len(events) < 3 {
+		t.Fatalf("expected >= 3 progress events for 3MiB file, got %d", len(events))
+	}
+	if int(events[len(events)-1].progress) != size {
+		t.Errorf("final progress = %v, want %d", events[len(events)-1].progress, size)
+	}
+}
+
+// TestSmokePhase6DownloadProgressInline asserts F6 progress for the
+// inline (no dest_path) branch.
+func TestSmokePhase6DownloadProgressInline(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "src.bin")
+	const size = 2 * 1024 * 1024 // 2 MiB -> 2 chunks
+	content := bytes.Repeat([]byte{0x43}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	_, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src}, "tok-dl-2")
+
+	if len(events) < 2 {
+		t.Fatalf("expected >= 2 progress events for 2MiB file, got %d", len(events))
+	}
+	if int(events[len(events)-1].progress) != size {
+		t.Errorf("final progress = %v, want %d", events[len(events)-1].progress, size)
+	}
 }
 
 // runFakeDaemon drives a daemonState dispatch loop on a pre-handshaked wss
