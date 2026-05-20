@@ -37,7 +37,10 @@ import (
 	"path/filepath"
 )
 
-const maxFileBytes = 10 << 20
+// maxFileBytes caps tools.ReadFile output daemon-side. var (not const)
+// so smoke tests can raise it for bridge-cap testing. Do not mutate at
+// runtime in production.
+var maxFileBytes int64 = 10 << 20
 
 func newDaemonCmd() *cobra.Command {
 	var cfgPath, stateDir string
