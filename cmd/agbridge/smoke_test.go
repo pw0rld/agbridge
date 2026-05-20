@@ -670,6 +670,57 @@ func TestSmokePhase6DownloadProgressInline(t *testing.T) {
 	}
 }
 
+// TestSmokePhase6DownloadInlineCap asserts F6.2 (cap parity with
+// read_file) AND the spec rule that the bridge does not emit a
+// trailing progress event after the cap-trip error. Lowers the
+// bridge cap and raises the daemon cap so the bridge cap trips
+// first.
+func TestSmokePhase6DownloadInlineCap(t *testing.T) {
+	origBridgeCap := maxBufferedOutput
+	origDaemonCap := maxFileBytes
+	maxBufferedOutput = 1 << 20  // 1 MiB
+	maxFileBytes = 15 << 20      // 15 MiB
+	t.Cleanup(func() {
+		maxBufferedOutput = origBridgeCap
+		maxFileBytes = origDaemonCap
+	})
+
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "big.bin")
+	const size = 3 * 1024 * 1024 // 3 MiB, larger than the 1 MiB bridge cap
+	content := bytes.Repeat([]byte{0x44}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src}, "tok-cap-1")
+
+	// mcpErrorResult shape: {"isError": true, "content": ..., "_meta":
+	// {"error_code": "...", ...}}.
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta, _ := res["_meta"].(map[string]any)
+	if code, _ := meta["error_code"].(string); code != "exceeds_max_size" {
+		t.Errorf("error_code: got %q want %q", code, "exceeds_max_size")
+	}
+
+	// Spec rule: chunk 1 (1 MiB) fits and emits one progress event;
+	// chunk 2 trips the cap and returns BEFORE emitting. So exactly
+	// one progress event should be observed — no trailing progress
+	// for the failed chunk.
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 progress event before cap-trip error, got %d: %+v", len(events), events)
+	}
+	if int(events[0].progress) != 1<<20 {
+		t.Errorf("first progress = %v, want %d (1 MiB chunk)", events[0].progress, 1<<20)
+	}
+}
+
 // runFakeDaemon drives a daemonState dispatch loop on a pre-handshaked wss
 // connection. Reuses the production daemonState so tests exercise the same
 // frame routing as the real daemon binary.
