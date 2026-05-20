@@ -266,8 +266,8 @@ func TestSmokePhase3ExecEndToEnd(t *testing.T) {
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Errorf("exitcode: %v", meta["exitcode"])
 	}
-	if s, ok := meta["stdout_b64"].(string); !ok || s == "" {
-		t.Errorf("stdout_b64 missing: %+v", meta)
+	if s, ok := meta["stdout"].(string); !ok || s == "" {
+		t.Errorf("stdout missing: %+v", meta)
 	}
 }
 
@@ -435,10 +435,9 @@ func TestSmokePhase5ReconnectAfterDrop(t *testing.T) {
 	if int(res["_meta"].(map[string]any)["exitcode"].(float64)) != 0 {
 		t.Fatalf("post-reconnect exitcode != 0: %+v", res["_meta"])
 	}
-	stdoutB64 := res["_meta"].(map[string]any)["stdout_b64"].(string)
-	out, _ := base64.StdEncoding.DecodeString(stdoutB64)
-	if !bytes.Contains(out, []byte("after")) {
-		t.Errorf("expected 'after' in stdout, got %q", out)
+	stdout := res["_meta"].(map[string]any)["stdout"].(string)
+	if !strings.Contains(stdout, "after") {
+		t.Errorf("expected 'after' in stdout, got %q", stdout)
 	}
 }
 
@@ -897,5 +896,55 @@ func TestSmokeF9WriteFileEmptyContentB64(t *testing.T) {
 	}
 	if st.Size() != 0 {
 		t.Errorf("file size: got %d want 0", st.Size())
+	}
+}
+
+// TestSmokeF9ExecUTF8NoB64 asserts that when stdout is valid UTF-8,
+// exec emits `stdout` only (no redundant `stdout_b64`). Saves ~33%
+// tokens on the common case.
+func TestSmokeF9ExecUTF8NoB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+	res := callTool(t, env, "exec", map[string]any{
+		"cmd":        "/bin/echo",
+		"args":       []string{"hello, world"},
+		"cwd":        tmpDir,
+		"timeout_ms": 5000,
+	})
+	meta := res["_meta"].(map[string]any)
+	if got := meta["stdout"]; got != "hello, world\n" {
+		t.Errorf("stdout: got %v want %q", got, "hello, world\n")
+	}
+	if _, present := meta["stdout_b64"]; present {
+		t.Errorf("stdout_b64 should be absent when stdout is valid UTF-8")
+	}
+}
+
+// TestSmokeF9ExecBinaryOnlyB64 asserts that when stdout is binary
+// (non-UTF-8), exec emits `stdout_b64` only (no `stdout` text key
+// with garbage). Mirror of the UTF-8 case.
+func TestSmokeF9ExecBinaryOnlyB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+	// printf with \x escapes emits raw bytes that are not valid UTF-8.
+	res := callTool(t, env, "exec", map[string]any{
+		"cmd":        "/usr/bin/printf",
+		"args":       []string{`\xff\xfe\xfd`},
+		"cwd":        tmpDir,
+		"timeout_ms": 5000,
+	})
+	meta := res["_meta"].(map[string]any)
+	if _, present := meta["stdout"]; present {
+		t.Errorf("stdout should be absent when stdout is binary")
+	}
+	b64, ok := meta["stdout_b64"].(string)
+	if !ok || b64 == "" {
+		t.Errorf("stdout_b64 should be present and non-empty for binary stdout, got %v", meta["stdout_b64"])
 	}
 }

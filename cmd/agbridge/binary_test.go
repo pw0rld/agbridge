@@ -541,8 +541,7 @@ func TestBinaryFourToolsEndToEnd(t *testing.T) {
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Fatalf("exec exitcode: %v (full meta %+v)", meta["exitcode"], meta)
 	}
-	stdoutB64 := meta["stdout_b64"].(string)
-	stdout, _ := base64DecodeString(stdoutB64)
+	stdout := meta["stdout"].(string)
 	if !strings.Contains(stdout, "phase-B-binary") {
 		t.Errorf("exec stdout missing marker, got %q", stdout)
 	}
