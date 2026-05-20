@@ -93,6 +93,39 @@ filesystem and shell.
    - `timeout` — `exec` hit `timeout_ms`. Either raise the timeout or
      switch to `exec_start` if it's a long job.
 
+## Token-saving priorities
+
+When choosing how to write or transfer content, pick the cheapest
+option first:
+
+1. **Editing an existing file** → `edit_file old_string=… new_string=…`.
+   Smallest diff, lowest token cost.
+2. **New file, content < ~8 KB** → `write_file path=… content="…"`.
+   `content` is raw text (recommended); use `content_b64` only when
+   the file is genuinely binary.
+3. **New file, content > ~8 KB OR you want to iterate locally** →
+   use your native Write tool to put the content at a local path
+   (e.g. `/tmp/<name>`), then `upload source="local_path"
+   local_path="/tmp/<name>" dest_path="/remote/…"`. The agbridge call
+   args carry only the two path strings; the bytes never appear in
+   the tool-call trace.
+4. **Content already reachable by URL** → `upload source="url"
+   url="…" dest_path="…"`. The daemon fetches; the AI carries no
+   bytes at all.
+5. **Genuinely binary content** → `download dest_path=…` for reads,
+   `upload source="chunks" chunks_b64=[…]` only when the bytes are
+   small and must travel inline (rare).
+
+Things to NOT do:
+
+- Don't use `write_file content_b64="…"` for text. It's the old
+  path; you'd burn ~33% extra tokens on base64.
+- Don't expect `exec` to put stdout in both `stdout` and
+  `stdout_b64`. As of F9, exactly one is set: text when UTF-8,
+  b64 when binary.
+- Don't write a Python wrapper that spawns the agbridge binary
+  directly. The bridge is an MCP server — use its tools.
+
 ## Common recipes
 
 ### "Read all the source files in a project"
