@@ -7,12 +7,14 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,10 +28,11 @@ import (
 
 func newEnrollCmd() *cobra.Command {
 	var (
-		gatewayURL string
-		token      string
-		stateDir   string
-		emitJSON   bool
+		gatewayURL    string
+		token         string
+		stateDir      string
+		emitJSON      bool
+		noRegisterMCP bool
 	)
 	cmd := &cobra.Command{
 		Use:   "enroll",
@@ -41,13 +44,14 @@ func newEnrollCmd() *cobra.Command {
 			if stateDir == "" {
 				stateDir = defaultStateDir()
 			}
-			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, emitJSON, cmd.OutOrStderr(), cmd.OutOrStdout())
+			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, emitJSON, noRegisterMCP, cmd.OutOrStderr(), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "gateway URL (e.g. wss://gw.example.com/)")
 	cmd.Flags().StringVar(&token, "token", "", "enrollment token (et_…)")
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "where to write state.json + keys (default ~/.config/agbridge/)")
 	cmd.Flags().BoolVar(&emitJSON, "json", false, "emit machine-readable JSON result")
+	cmd.Flags().BoolVar(&noRegisterMCP, "no-register-mcp", false, "skip auto-registering agbridge with detected AI clients (bridge role only)")
 	return cmd
 }
 
@@ -68,7 +72,7 @@ type enrollOutcome struct {
 	Steps     []enrollStep `json:"steps"`
 }
 
-func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON bool, stderr, stdout io.Writer) error {
+func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, noRegisterMCP bool, stderr, stdout io.Writer) error {
 	outcome := enrollOutcome{}
 
 	report := func(stage string, ok bool, msg string, dur time.Duration) {
@@ -282,71 +286,170 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON b
 	fmt.Fprintf(stderr, "\nEnrolled as %q (role=%s).\n", enrollResp.Name, role)
 	fmt.Fprintf(stderr, "Start the %s: agbridge %s --state-dir %s\n", role, role, stateDir)
 	if role == "bridge" {
-		printBridgeAIBootstrap(stderr, enrollResp.Name, enrollResp.TargetDaemon, stateDir)
+		autoSetupBridge(stderr, enrollResp.Name, enrollResp.TargetDaemon, stateDir, noRegisterMCP)
 	}
 	return nil
 }
 
-// printBridgeAIBootstrap prints the "you just enrolled a bridge, here's
-// how to wire it into your AI client and what to say to the AI" block.
-// Goal: by the time the operator sees this, they shouldn't need to read
-// any external doc to get a working session.
-func printBridgeAIBootstrap(w io.Writer, bridgeName, daemonName, stateDir string) {
+// errMCPAlreadyRegistered is the sentinel returned by client-specific
+// registrars when agbridge is already wired up in that client's config.
+var errMCPAlreadyRegistered = errors.New("agbridge already registered")
+
+// aiClient is one supported AI client (Codex, Claude Code, …) that can
+// be auto-configured by the enrollment flow.
+type aiClient struct {
+	name     string // human-readable: "Codex CLI", "Claude Code"
+	register func(stateDir string) error
+}
+
+// detectAIClients returns the AI clients present on this machine. Order
+// matters only for nicer output; registration is independent per client.
+func detectAIClients() []aiClient {
+	var clients []aiClient
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); err == nil {
+		clients = append(clients, aiClient{name: "Codex CLI", register: registerCodex})
+	}
+	if _, err := exec.LookPath("claude"); err == nil {
+		clients = append(clients, aiClient{name: "Claude Code", register: registerClaudeCode})
+	}
+	return clients
+}
+
+// registerCodex appends [mcp_servers.agbridge] to ~/.codex/config.toml
+// if not already present.
+func registerCodex(stateDir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(home, ".codex", "config.toml")
+	content, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", cfgPath, err)
+	}
+	if strings.Contains(string(content), "[mcp_servers.agbridge]") {
+		return errMCPAlreadyRegistered
+	}
 	stateArg := ""
 	if stateDir != defaultStateDir() {
-		stateArg = fmt.Sprintf(", \"--state-dir\", %q", stateDir)
+		stateArg = fmt.Sprintf(`, "--state-dir", "%s"`, stateDir)
 	}
-	stateArgCLI := ""
+	section := fmt.Sprintf("\n[mcp_servers.agbridge]\ncommand = \"agbridge\"\nargs = [\"bridge\"%s]\n", stateArg)
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", cfgPath, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(section); err != nil {
+		return fmt.Errorf("append %s: %w", cfgPath, err)
+	}
+	return nil
+}
+
+// registerClaudeCode shells out to `claude mcp add` — that command knows
+// where Claude Code stores config and serialises writes against
+// Claude Code's own writer, so we don't race it.
+func registerClaudeCode(stateDir string) error {
+	args := []string{"mcp", "add", "agbridge", "agbridge", "--", "bridge"}
 	if stateDir != defaultStateDir() {
-		stateArgCLI = fmt.Sprintf(" -- bridge --state-dir %s", stateDir)
-	} else {
-		stateArgCLI = " -- bridge"
+		args = append(args, "--state-dir", stateDir)
+	}
+	cmd := exec.Command("claude", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "already exists") || strings.Contains(string(out), "already configured") {
+			return errMCPAlreadyRegistered
+		}
+		return fmt.Errorf("claude mcp add: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// autoSetupBridge does the "you just enrolled a bridge — make it
+// useful immediately" dance: detect installed AI clients, register
+// agbridge in their MCP configs, and print the restart/paste
+// instructions. Failure is non-fatal — we always fall back to
+// telling the operator how to do it manually.
+func autoSetupBridge(w io.Writer, bridgeName, daemonName, stateDir string, noRegister bool) {
+	if noRegister {
+		fmt.Fprintln(w, "\nSkipping MCP auto-registration (--no-register-mcp set).")
+		printManualSnippets(w, stateDir)
+		printRestartBanner(w, bridgeName, daemonName)
+		return
 	}
 
+	clients := detectAIClients()
+	if len(clients) == 0 {
+		fmt.Fprintln(w, "\nNo supported AI client (Codex CLI, Claude Code) detected on this host.")
+		printManualSnippets(w, stateDir)
+		printRestartBanner(w, bridgeName, daemonName)
+		return
+	}
+
+	fmt.Fprintln(w)
+	for _, c := range clients {
+		err := c.register(stateDir)
+		switch {
+		case err == nil:
+			fmt.Fprintf(w, "  [✓] registered agbridge with %s\n", c.name)
+		case errors.Is(err, errMCPAlreadyRegistered):
+			fmt.Fprintf(w, "  [○] %s already has agbridge registered — skipped\n", c.name)
+		default:
+			fmt.Fprintf(w, "  [✗] %s register failed: %v\n", c.name, err)
+		}
+	}
+	printRestartBanner(w, bridgeName, daemonName)
+}
+
+// printRestartBanner prints the loud "restart your AI client now" box
+// plus the short one-line paste-into-AI-session prompt.
+func printRestartBanner(w io.Writer, bridgeName, daemonName string) {
 	fmt.Fprintf(w, `
-─── connect this bridge to an AI client ──────────────────────────────────
+══════════════════════════════════════════════════════════════════
+  RESTART your AI client now — exit fully, then re-run it.
+══════════════════════════════════════════════════════════════════
 
-Codex CLI — append to ~/.codex/config.toml:
+After it restarts, paste this once into the AI session:
 
-    [mcp_servers.agbridge]
-    command = "agbridge"
-    args = ["bridge"%s]
+  I have an MCP server "agbridge" connected (bridge=%q, daemon=%q).
+  Its tools operate on a remote machine, NOT this host. Use ONLY
+  agbridge.* tools for read/write/exec on the remote side. DO NOT
+  write Python wrappers around the agbridge binary.
 
-Claude Code:
+`, bridgeName, daemonName)
+}
 
-    claude mcp add agbridge agbridge%s
+// printManualSnippets dumps the per-client MCP config snippets, for
+// the case where auto-registration was skipped or no client was
+// detected.
+func printManualSnippets(w io.Writer, stateDir string) {
+	stateArgTOML := ""
+	stateArgCLI := " -- bridge"
+	stateArgJSON := ""
+	if stateDir != defaultStateDir() {
+		stateArgTOML = fmt.Sprintf(`, "--state-dir", %q`, stateDir)
+		stateArgCLI = fmt.Sprintf(" -- bridge --state-dir %s", stateDir)
+		stateArgJSON = fmt.Sprintf(`, "--state-dir", "%s"`, stateDir)
+	}
+	fmt.Fprintf(w, `
+Manual MCP config — pick the one your client uses:
 
-Cline / Continue / generic JSON config:
+  Codex CLI (~/.codex/config.toml):
 
-    {
-      "mcpServers": {
-        "agbridge": {
-          "command": "agbridge",
-          "args": ["bridge"%s]
-        }
-      }
-    }
+      [mcp_servers.agbridge]
+      command = "agbridge"
+      args = ["bridge"%s]
 
-Then restart the AI client. After it starts, paste this once into the
-session so the model knows what it's looking at:
+  Claude Code:
 
-    I have an MCP server called "agbridge" connected (bridge=%q,
-    daemon=%q). Its tools — read_file / write_file / edit_file / exec /
-    list_directory / stat / search / download / upload / port_forward,
-    plus exec_start family — operate on the daemon's filesystem and
-    shell, NOT this host. Paths in tool args refer to the daemon side.
-    Files >10 MB: use download with dest_path, or read_file with
-    offset/limit. Start by listing a directory you know exists on the
-    daemon to confirm connectivity.
+      claude mcp add agbridge agbridge%s
 
-For the full tool reference + recipes, drop AGENTS.md into your project
-or ~/.codex/AGENTS.md / ./CLAUDE.md:
+  Cline / Continue / generic JSON:
 
-    curl -L https://raw.githubusercontent.com/pw0rld/agbridge/main/AGENTS.md \
-         -o AGENTS.md
+      "agbridge": { "command": "agbridge", "args": ["bridge"%s] }
 
-──────────────────────────────────────────────────────────────────────────
-`, stateArg, stateArgCLI, stateArg, bridgeName, daemonName)
+`, stateArgTOML, stateArgCLI, stateArgJSON)
 }
 
 func defaultStateDir() string {
