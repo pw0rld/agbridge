@@ -281,7 +281,72 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON b
 	}
 	fmt.Fprintf(stderr, "\nEnrolled as %q (role=%s).\n", enrollResp.Name, role)
 	fmt.Fprintf(stderr, "Start the %s: agbridge %s --state-dir %s\n", role, role, stateDir)
+	if role == "bridge" {
+		printBridgeAIBootstrap(stderr, enrollResp.Name, enrollResp.TargetDaemon, stateDir)
+	}
 	return nil
+}
+
+// printBridgeAIBootstrap prints the "you just enrolled a bridge, here's
+// how to wire it into your AI client and what to say to the AI" block.
+// Goal: by the time the operator sees this, they shouldn't need to read
+// any external doc to get a working session.
+func printBridgeAIBootstrap(w io.Writer, bridgeName, daemonName, stateDir string) {
+	stateArg := ""
+	if stateDir != defaultStateDir() {
+		stateArg = fmt.Sprintf(", \"--state-dir\", %q", stateDir)
+	}
+	stateArgCLI := ""
+	if stateDir != defaultStateDir() {
+		stateArgCLI = fmt.Sprintf(" -- bridge --state-dir %s", stateDir)
+	} else {
+		stateArgCLI = " -- bridge"
+	}
+
+	fmt.Fprintf(w, `
+─── connect this bridge to an AI client ──────────────────────────────────
+
+Codex CLI — append to ~/.codex/config.toml:
+
+    [mcp_servers.agbridge]
+    command = "agbridge"
+    args = ["bridge"%s]
+
+Claude Code:
+
+    claude mcp add agbridge agbridge%s
+
+Cline / Continue / generic JSON config:
+
+    {
+      "mcpServers": {
+        "agbridge": {
+          "command": "agbridge",
+          "args": ["bridge"%s]
+        }
+      }
+    }
+
+Then restart the AI client. After it starts, paste this once into the
+session so the model knows what it's looking at:
+
+    I have an MCP server called "agbridge" connected (bridge=%q,
+    daemon=%q). Its tools — read_file / write_file / edit_file / exec /
+    list_directory / stat / search / download / upload / port_forward,
+    plus exec_start family — operate on the daemon's filesystem and
+    shell, NOT this host. Paths in tool args refer to the daemon side.
+    Files >10 MB: use download with dest_path, or read_file with
+    offset/limit. Start by listing a directory you know exists on the
+    daemon to confirm connectivity.
+
+For the full tool reference + recipes, drop AGENTS.md into your project
+or ~/.codex/AGENTS.md / ./CLAUDE.md:
+
+    curl -L https://raw.githubusercontent.com/pw0rld/agbridge/main/AGENTS.md \
+         -o AGENTS.md
+
+──────────────────────────────────────────────────────────────────────────
+`, stateArg, stateArgCLI, stateArg, bridgeName, daemonName)
 }
 
 func defaultStateDir() string {
