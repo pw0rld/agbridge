@@ -53,14 +53,20 @@ AI-UX improvements + bug fixes from stress and integration testing.
   release the fd. Hygiene only — does not fully resolve the
   back-to-back burst symptom (F4b), but stops the goroutine/fd leak
   that contributes to it.
+- **F6 — bridge-side progress + inline download cap.** Investigation
+  found daemon already streams 1 MiB FileChunk frames; the actual
+  buffer point was the bridge's `readFileHandler` and the inline
+  branch of `downloadHandler`. Bridge handlers now emit MCP
+  `notifications/progress` per chunk (progress = bytes received,
+  total omitted because FileChunk does not carry size). `download`
+  without `dest_path` gained the same 10 MB `maxBufferedOutput` cap
+  `read_file` already had; the error message tells the caller to
+  pass `dest_path` to stream big files to disk. No protocol or
+  daemon changes — `fileproto` untouched. Smoke regressions cover
+  progress emission, the inline cap, and the no-progressToken
+  silent path.
 
 ## Next up
-
-- **P1: F6 — large file streaming for `read_file` / `download`.**
-  Both currently buffer the whole file daemon-side before responding,
-  risking OOM on >100 MB files. Plan: reuse the S1 MCP-progress
-  infrastructure (`mcp.EmitterFromContext`) to forward `FileChunk`
-  frames as progress notifications instead of buffering.
 
 ## Deferred (not blocking)
 
