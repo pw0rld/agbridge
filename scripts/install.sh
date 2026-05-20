@@ -4,15 +4,19 @@
 # Usage:
 #   curl -sSL https://github.com/pw0rld/agbridge/raw/main/scripts/install.sh | bash
 #
+# Installs into ~/bin by default — no sudo, no root needed. Make sure
+# ~/bin is on your PATH; the script prints a one-liner to add it if it
+# isn't.
+#
 # Environment overrides:
 #   VERSION=v0.1.0-phase-b   pin a specific release (default: latest)
-#   INSTALL_DIR=/opt/bin     install path (default: /usr/local/bin)
+#   INSTALL_DIR=/opt/bin     install path (default: $HOME/bin)
 #   REPO=user/fork           target a fork (default: pw0rld/agbridge)
 set -euo pipefail
 
 REPO="${REPO:-pw0rld/agbridge}"
 VERSION="${VERSION:-}"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/bin}"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$OS" in
@@ -70,12 +74,24 @@ if curl -fsSL "$SUMS_URL" -o "$TMP.sums" 2>/dev/null; then
   fi
 fi
 
-if [ -w "$INSTALL_DIR" ]; then
-  install -m 0755 "$TMP" "$INSTALL_DIR/agbridge"
-else
-  echo "agbridge: installing to $INSTALL_DIR (sudo)"
-  sudo install -m 0755 "$TMP" "$INSTALL_DIR/agbridge"
+mkdir -p "$INSTALL_DIR"
+if [ ! -w "$INSTALL_DIR" ]; then
+  echo "agbridge: $INSTALL_DIR is not writable" >&2
+  echo "agbridge: pick a writable path, e.g. INSTALL_DIR=\$HOME/bin or INSTALL_DIR=/tmp" >&2
+  exit 1
 fi
+install -m 0755 "$TMP" "$INSTALL_DIR/agbridge"
 
 echo "agbridge: installed to $INSTALL_DIR/agbridge"
+
+case ":${PATH}:" in
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    echo
+    echo "agbridge: $INSTALL_DIR is not on your PATH. Add this line to your shell rc:"
+    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo
+    ;;
+esac
+
 "$INSTALL_DIR/agbridge" --help 2>&1 | head -3 || true
