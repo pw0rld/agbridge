@@ -1008,3 +1008,119 @@ func TestSmokeF9UploadLocalPathMissingFile(t *testing.T) {
 		t.Errorf("error_code: got %q want bad_payload", code)
 	}
 }
+
+// TestSmokeF9WriteToolBytesComparison is the F9 acceptance test:
+// the same 4 KB realistic Python file is written three ways and the
+// tools/call request size for each is compared.
+//
+// Acceptance constraints:
+//
+//	write_file(content)    ≤  write_file(content_b64) × 0.85
+//	upload(local_path)     ≤  write_file(content_b64) × 0.05
+//
+// Note: for ASCII Go source, JSON-escaped text is ~8% larger than raw
+// while base64 is ~33% larger, giving a natural text/b64 ratio of ~82-84%.
+// The 0.85 ceiling still catches any regression (e.g., re-adding base64
+// to the content path would push the ratio to ~100%).
+// If a future change re-adds base64 to the content path or fattens
+// the local_path args, this test fails loudly.
+func TestSmokeF9WriteToolBytesComparison(t *testing.T) {
+	// Realistic ASCII source — use agbridge's own readfile.go as the
+	// fixture so the benchmark tracks real-world code, not lorem ipsum.
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	fixturePath := filepath.Join(repoRoot, "internal/tools/readfile.go")
+	content, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("fixture %s: %v", fixturePath, err)
+	}
+	if len(content) < 3000 {
+		t.Fatalf("fixture suspiciously small (%d bytes), expected ~4 KB", len(content))
+	}
+
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths:  []string{tmpDir + "/*", tmpDir},
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+
+	// Stage local file for the upload path.
+	localStaged := filepath.Join(tmpDir, "staged.go")
+	if err := os.WriteFile(localStaged, content, 0o644); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	type call struct {
+		name string
+		args map[string]any
+	}
+	calls := []call{
+		{
+			name: "write_file",
+			args: map[string]any{
+				"path":        filepath.Join(tmpDir, "out-b64.go"),
+				"content_b64": base64.StdEncoding.EncodeToString(content),
+			},
+		},
+		{
+			name: "write_file",
+			args: map[string]any{
+				"path":    filepath.Join(tmpDir, "out-text.go"),
+				"content": string(content),
+			},
+		},
+		{
+			name: "upload",
+			args: map[string]any{
+				"source":     "local_path",
+				"local_path": localStaged,
+				"dest_path":  filepath.Join(tmpDir, "out-upload.go"),
+			},
+		},
+	}
+
+	// requestBytes builds the exact JSON-RPC tools/call payload that
+	// callTool writes to stdin and returns its byte length. This is the
+	// precise number an AI client would emit.
+	requestBytes := func(name string, args map[string]any) int {
+		argsJSON, _ := json.Marshal(args)
+		line := fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+			name, string(argsJSON),
+		)
+		return len(line)
+	}
+
+	sizes := make([]int, len(calls))
+	wantSha := sha256.Sum256(content)
+	for i, c := range calls {
+		sizes[i] = requestBytes(c.name, c.args)
+		res := callTool(t, env, c.name, c.args)
+		if isErr, _ := res["isError"].(bool); isErr {
+			t.Fatalf("[%d] %s failed: %+v", i, c.name, res)
+		}
+		meta, _ := res["_meta"].(map[string]any)
+		gotSha, _ := meta["sha256"].(string)
+		if gotSha != hex.EncodeToString(wantSha[:]) {
+			t.Errorf("[%d] %s sha mismatch: got %s want %s", i, c.name, gotSha, hex.EncodeToString(wantSha[:]))
+		}
+	}
+
+	b64Bytes, textBytes, uploadBytes := sizes[0], sizes[1], sizes[2]
+	textRatio := float64(textBytes) / float64(b64Bytes)
+	uploadRatio := float64(uploadBytes) / float64(b64Bytes)
+
+	t.Logf("fixture size: %d bytes", len(content))
+	t.Logf("write_file content_b64 request: %d bytes  (baseline)", b64Bytes)
+	t.Logf("write_file content     request: %d bytes  (%.1f%% saved)", textBytes, (1-textRatio)*100)
+	t.Logf("upload     local_path  request: %d bytes  (%.1f%% saved)", uploadBytes, (1-uploadRatio)*100)
+
+	if textRatio > 0.85 {
+		t.Errorf("F9 thesis violated: write_file(content) is %.0f%% of content_b64 size, want ≤ 85%%", textRatio*100)
+	}
+	if uploadRatio > 0.05 {
+		t.Errorf("F9 thesis violated: upload(local_path) is %.1f%% of content_b64 size, want ≤ 5%%", uploadRatio*100)
+	}
+}
