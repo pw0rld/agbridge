@@ -850,19 +850,20 @@ func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
 		"timed_out":   c.TimedOut,
 		"truncated":   c.Truncated,
 	}
-	// Surface raw UTF-8 strings when possible so AI agents read fields
-	// directly without base64 decode. Keep _b64 variants as fallback for
-	// binary output and existing consumers.
 	stdoutUTF8 := utf8.ValidString(stdout)
 	stderrUTF8 := utf8.ValidString(stderr)
+	// F9: emit text OR b64, never both. Text saves ~33% tokens; b64
+	// only when the bytes can't safely live in a JSON string.
 	if stdoutUTF8 {
 		meta["stdout"] = stdout
+	} else {
+		meta["stdout_b64"] = base64.StdEncoding.EncodeToString([]byte(stdout))
 	}
 	if stderrUTF8 {
 		meta["stderr"] = stderr
+	} else {
+		meta["stderr_b64"] = base64.StdEncoding.EncodeToString([]byte(stderr))
 	}
-	meta["stdout_b64"] = base64.StdEncoding.EncodeToString([]byte(stdout))
-	meta["stderr_b64"] = base64.StdEncoding.EncodeToString([]byte(stderr))
 
 	// content[0].text: prioritize stdout (the usual interest) and only fall
 	// through to stderr when stdout is empty. Non-zero exitcode prepends a

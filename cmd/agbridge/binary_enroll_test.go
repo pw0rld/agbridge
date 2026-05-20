@@ -84,11 +84,7 @@ daemons: []
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Fatalf("exec exitcode: %+v", meta)
 	}
-	stdoutB64 := meta["stdout_b64"].(string)
-	stdout, err := base64DecodeString(stdoutB64)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stdout := meta["stdout"].(string)
 	if !strings.Contains(stdout, "phase-B-enroll-works") {
 		t.Fatalf("exec stdout missing marker: %q", stdout)
 	}
