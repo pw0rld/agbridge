@@ -124,7 +124,11 @@ func newBridgeCmd() *cobra.Command {
 				Description: "Read a file on the remote daemon machine. Returns content " +
 					"+ sha256 in _meta. offset+limit support partial reads — e.g. " +
 					"offset=1000, limit=500 returns 500 bytes starting at byte 1000. " +
-					"Use this to avoid loading whole large files into context.",
+					"Use this to avoid loading whole large files into context. " +
+					"10 MB cap on returned content; larger files return " +
+					"exceeds_max_size (use offset+limit or download with dest_path). " +
+					"Emits MCP notifications/progress per chunk when the client " +
+					"supplies a progressToken in _meta.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -238,9 +242,14 @@ func newBridgeCmd() *cobra.Command {
 			srv.RegisterTool(mcp.ToolSpec{
 				Name: "download",
 				Description: "Stream a file from the daemon machine back to the AI " +
-					"client. No 10 MB cap (1 GiB). Optional dest_path makes the bridge " +
-					"save the file locally and return only metadata; without it, the " +
-					"content is returned inline (text if UTF-8, base64 otherwise).",
+					"client. With dest_path the bridge writes chunks straight to that " +
+					"local path and returns only metadata — use this for files larger " +
+					"than 10 MB, no inline cap applies. Without dest_path the content " +
+					"is returned inline (text if UTF-8, base64 otherwise), capped at " +
+					"10 MB; oversize inline requests return exceeds_max_size and ask " +
+					"the caller to retry with dest_path. Emits MCP " +
+					"notifications/progress per chunk when the client supplies a " +
+					"progressToken in _meta.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
