@@ -219,7 +219,10 @@ func callToolWithProgress(t *testing.T, env *phase4Env, name string, args map[st
 			t.Fatalf("unmarshal %q: %v", line, err)
 		}
 		if method, ok := msg["method"].(string); ok && method == "notifications/progress" {
-			params, _ := msg["params"].(map[string]any)
+			params, ok := msg["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("notifications/progress has no params map: %v", msg)
+			}
 			ev := progressEvent{}
 			if p, ok := params["progress"].(float64); ok {
 				ev.progress = p
