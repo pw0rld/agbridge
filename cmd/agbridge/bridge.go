@@ -9,9 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -225,19 +226,22 @@ func newBridgeCmd() *cobra.Command {
 
 			srv.RegisterTool(mcp.ToolSpec{
 				Name: "upload",
-				Description: "Transfer a file to the daemon machine. Two source modes: " +
-					"`chunks` (AI client sends content as base64 chunks, no 10 MB cap) " +
-					"and `url` (daemon performs an HTTP GET against the URL — bridge " +
-					"transfers nothing, ideal for installer/release downloads). " +
-					"Optional expected_sha256 validates integrity before commit. " +
-					"Atomic via temp+rename. Cap: 1 GiB.",
+				Description: "Transfer a file to the daemon machine. Three " +
+					"source modes (pick one via `source`): `local_path` — " +
+					"bridge reads from its own disk and streams " +
+					"(recommended for AI-generated files already written " +
+					"locally); `url` — daemon fetches from URL " +
+					"(recommended for content reachable by URL); `chunks` " +
+					"— inline base64 chunks (use only for small binary " +
+					"content the AI must embed inline).",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"dest_path":       map[string]any{"type": "string"},
-						"source":          map[string]any{"type": "string", "enum": []string{"chunks", "url"}},
+						"source":          map[string]any{"type": "string", "enum": []string{"chunks", "url", "local_path"}},
 						"chunks_b64":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 						"url":             map[string]any{"type": "string"},
+						"local_path":      map[string]any{"type": "string"},
 						"mode":            map[string]any{"type": "integer"},
 						"expected_size":   map[string]any{"type": "integer"},
 						"expected_sha256": map[string]any{"type": "string"},
@@ -1496,6 +1500,7 @@ type uploadArgs struct {
 	Source         string   `json:"source"`
 	ChunksB64      []string `json:"chunks_b64,omitempty"`
 	URL            string   `json:"url,omitempty"`
+	LocalPath      string   `json:"local_path,omitempty"`
 	Mode           uint32   `json:"mode,omitempty"`
 	ExpectedSize   int64    `json:"expected_size,omitempty"`
 	ExpectedSha256 string   `json:"expected_sha256,omitempty"`
@@ -1518,15 +1523,28 @@ func (r *router) uploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 		if args.URL == "" {
 			return mcpErrorResult(errcode.New("bad_payload", "url required for source=url")), nil
 		}
+	case "local_path":
+		if args.LocalPath == "" {
+			return mcpErrorResult(errcode.New("bad_payload", "local_path required for source=local_path")), nil
+		}
+		if _, err := os.Stat(args.LocalPath); err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "local_path: "+err.Error())), nil
+		}
 	default:
-		return mcpErrorResult(errcode.New("bad_payload", "source must be 'chunks' or 'url'")), nil
+		return mcpErrorResult(errcode.New("bad_payload", "source must be 'chunks', 'url', or 'local_path'")), nil
 	}
 
 	reqID := newReqID()
+	// For local_path, the bridge reads the file locally and streams chunks to
+	// the daemon — from the daemon's perspective this is a "chunks" upload.
+	daemonSource := args.Source
+	if daemonSource == "local_path" {
+		daemonSource = "chunks"
+	}
 	reqJSON, _ := fileproto.UploadRequest{
 		DestPath:       args.DestPath,
 		Mode:           args.Mode,
-		Source:         args.Source,
+		Source:         daemonSource,
 		URL:            args.URL,
 		ExpectedSize:   args.ExpectedSize,
 		ExpectedSha256: args.ExpectedSha256,
@@ -1548,6 +1566,41 @@ func (r *router) uploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 			eof := i == len(args.ChunksB64)-1
 			if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
 				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+			}
+		}
+	}
+
+	// For local_path source, open the file and stream 1 MiB chunks.
+	if args.Source == "local_path" {
+		f, err := os.Open(args.LocalPath)
+		if err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "open local_path: "+err.Error())), nil
+		}
+		defer f.Close()
+		const chunkSize = 1 << 20
+		buf := make([]byte, chunkSize)
+		for {
+			n, rerr := f.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				eof := rerr == io.EOF
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+				}
+				if eof {
+					break
+				}
+			}
+			if rerr == io.EOF {
+				// Zero-length file: send a single empty Eof chunk so daemon closes the write cleanly.
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}); err != nil {
+					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+				}
+				break
+			}
+			if rerr != nil {
+				return mcpErrorResult(errcode.New("read_failed", "local_path read: "+rerr.Error())), nil
 			}
 		}
 	}

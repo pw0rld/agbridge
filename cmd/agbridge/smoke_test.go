@@ -132,6 +132,7 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 	srv.RegisterTool(mcp.ToolSpec{Name: "write_file", InputSchema: map[string]any{"type": "object"}}, rt.writeFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "port_forward", InputSchema: map[string]any{"type": "object"}}, rt.portForwardHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "download", InputSchema: map[string]any{"type": "object"}}, rt.downloadHandler)
+	srv.RegisterTool(mcp.ToolSpec{Name: "upload", InputSchema: map[string]any{"type": "object"}}, rt.uploadHandler)
 
 	return &phase4Env{ctx: ctx, srv: srv, rt: rt, gatewayURL: u, cliCfg: cliCfg}
 }
@@ -946,5 +947,64 @@ func TestSmokeF9ExecBinaryOnlyB64(t *testing.T) {
 	b64, ok := meta["stdout_b64"].(string)
 	if !ok || b64 == "" {
 		t.Errorf("stdout_b64 should be present and non-empty for binary stdout, got %v", meta["stdout_b64"])
+	}
+}
+
+// TestSmokeF9UploadLocalPath asserts that source=local_path reads
+// the bridge-host file and streams it to the daemon, producing a
+// matching sha256 on the daemon side. The AI never embeds the
+// content inline — args contain only two path strings.
+func TestSmokeF9UploadLocalPath(t *testing.T) {
+	bridgeStage := t.TempDir()
+	daemonDest := t.TempDir()
+
+	srcPath := filepath.Join(bridgeStage, "payload.py")
+	content := []byte("from os import getcwd\nprint(getcwd())\n")
+	if err := os.WriteFile(srcPath, content, 0o644); err != nil {
+		t.Fatalf("stage src: %v", err)
+	}
+	wantSha := sha256.Sum256(content)
+	dstPath := filepath.Join(daemonDest, "out.py")
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{daemonDest + "/*", daemonDest},
+	})
+	res := callTool(t, env, "upload", map[string]any{
+		"source":     "local_path",
+		"local_path": srcPath,
+		"dest_path":  dstPath,
+	})
+	meta := res["_meta"].(map[string]any)
+	if got := meta["sha256"].(string); got != hex.EncodeToString(wantSha[:]) {
+		t.Errorf("sha256: got %s want %s", got, hex.EncodeToString(wantSha[:]))
+	}
+	onDisk, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("read daemon dst: %v", err)
+	}
+	if !bytes.Equal(onDisk, content) {
+		t.Errorf("daemon content mismatch")
+	}
+}
+
+// TestSmokeF9UploadLocalPathMissingFile asserts that an unreadable
+// local_path returns bad_payload (no half-done upload, daemon
+// untouched).
+func TestSmokeF9UploadLocalPathMissingFile(t *testing.T) {
+	daemonDest := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{daemonDest + "/*", daemonDest},
+	})
+	res := callTool(t, env, "upload", map[string]any{
+		"source":     "local_path",
+		"local_path": "/nonexistent/foo.bin",
+		"dest_path":  filepath.Join(daemonDest, "out.bin"),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
 	}
 }
