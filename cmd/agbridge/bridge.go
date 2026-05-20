@@ -1600,7 +1600,7 @@ func (r *router) uploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 				break
 			}
 			if rerr != nil {
-				return mcpErrorResult(errcode.New("read_failed", "local_path read: "+rerr.Error())), nil
+				return mcpErrorResult(errcode.New("bad_payload", "local_path read: "+rerr.Error())), nil
 			}
 		}
 	}
