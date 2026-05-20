@@ -181,12 +181,18 @@ sandbox — narrow `--allowed-paths` at issue-token time is your defense.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `exec` | `cmd`, `args`, `cwd`, `env`, `timeout_ms` | Spawn subprocess (own pgroup, SIGKILL on timeout), stream stdout/stderr back |
-| `read_file` | `path`, `max_size` | Stream file back, sha256 in `_meta` |
+| `exec` | `cmd`, `args`, `cwd`, `env`, `timeout_ms` | Spawn subprocess (own pgroup, SIGKILL on timeout), stream stdout/stderr back; progress notifications |
+| `read_file` | `path`, `offset`, `limit`, `max_size` | Stream file back (≤10 MB inline), sha256 in `_meta`; progress notifications |
 | `write_file` | `path`, `content_b64`, `mode` | Atomic write via temp + rename |
+| `download` | `src_path`, `dest_path`, `offset`, `limit` | Stream a file to the bridge host; inline (≤10 MB) or to disk via `dest_path` (no cap); progress notifications |
 | `port_forward` | `remote_host`, `remote_port`, `local_port` | Bind local listener, forward TCP to daemon |
 
-10 MB cap per `exec` stream and per file read/write.
+10 MB cap on inline content (`exec` output, `read_file`, `write_file`,
+`download` without `dest_path`). Use `download` with `dest_path` —
+chunks land straight on local disk — for larger files. Progress
+notifications fire only when the MCP client supplies
+`_meta.progressToken`; clients that don't opt in see byte-identical
+behaviour.
 `port_forward` blocks `forbidden_ports` set at issue-token time.
 
 ## Security model
