@@ -300,4 +300,4 @@ WebSocket-Upgrade requests go to the bridge/daemon multiplexer; POST
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.
