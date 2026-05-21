@@ -132,6 +132,12 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
+	// Pair the auth_ok with a conn_close on the way out so the audit log is
+	// a complete connect/disconnect ledger — operators consuming the log
+	// can detect when a daemon goes offline without polling.
+	defer func() {
+		_ = aud.Append(map[string]any{"event": "conn_close", "role": "daemon", "name": h.Name})
+	}()
 	// Read loop owned by handleDaemon (not by any individual bridge): each
 	// frame is routed to the currently-subscribed bridge writer or dropped
 	// if no bridge is connected. When the conn dies (revocation, network),
@@ -183,6 +189,12 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	}
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+	// Pair the auth_ok with a conn_close on the way out so the audit log
+	// is a complete connect/disconnect ledger (see handleDaemon for the
+	// daemon-side equivalent).
+	defer func() {
+		_ = aud.Append(map[string]any{"event": "conn_close", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+	}()
 
 	apiKey := []byte(h.Secret)
 
