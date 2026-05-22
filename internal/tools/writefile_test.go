@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -89,14 +90,23 @@ func TestWriteFileChunked(t *testing.T) {
 func TestWriteFilePathForbidden(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.txt")
+	allowlist := []string{"/different/a", "/different/b/*"}
 	complete, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path}, []string{"/different/*"}, 1<<20,
+		fileproto.FileWriteRequest{Path: path}, allowlist, 1<<20,
 		chunksFrom([]byte("x"), 1))
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if complete.Err != "path_forbidden" {
 		t.Errorf("err: %q", complete.Err)
+	}
+	if complete.ErrDetail == "" {
+		t.Fatal("ErrDetail should not be empty on path_forbidden")
+	}
+	for _, want := range allowlist {
+		if !strings.Contains(complete.ErrDetail, want) {
+			t.Errorf("ErrDetail %q missing allowlist entry %q", complete.ErrDetail, want)
+		}
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("file should not exist")

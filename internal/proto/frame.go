@@ -41,6 +41,11 @@ const (
 	FrameTypeFileWriteRequest FrameType = 31
 	FrameTypeFileChunk        FrameType = 32
 	FrameTypeFileComplete     FrameType = 33
+	FrameTypeFileEditRequest  FrameType = 34
+	FrameTypeListDirRequest   FrameType = 35
+	FrameTypeListDirResponse  FrameType = 36
+	FrameTypeStatRequest      FrameType = 37
+	FrameTypeStatResponse     FrameType = 38
 
 	FrameTypeStreamOpen  FrameType = 40
 	FrameTypeStreamAck   FrameType = 41
@@ -51,6 +56,29 @@ const (
 	FrameTypeNoiseInit  FrameType = 50
 	FrameTypeNoiseResp  FrameType = 51
 	FrameTypeNoiseRekey FrameType = 52
+
+	// Policy/capabilities introspection (v0.2.0+). Bridge → daemon empty
+	// payload; daemon → bridge JSON describing current sandbox + meta.
+	FrameTypeCapabilitiesRequest  FrameType = 60
+	FrameTypeCapabilitiesResponse FrameType = 61
+
+	// Bulk file transfer (v0.2.0+). Reuse FileChunk for both directions
+	// and FileComplete for terminal status; new request types carry the
+	// upload mode (chunks vs URL) and download offset/limit.
+	FrameTypeUploadRequest   FrameType = 70
+	FrameTypeDownloadRequest FrameType = 71
+
+	// Background process management (v0.3.0+). A single request frame
+	// carries action=start|status|logs|kill|list with action-specific
+	// fields; the response frame mirrors the action plus result fields.
+	FrameTypeBgExecRequest  FrameType = 80
+	FrameTypeBgExecResponse FrameType = 81
+
+	// Native search (v0.3.0+). Replaces "exec grep" so AI agents don't
+	// have to deal with cross-platform grep / shell quoting / output
+	// format inconsistencies.
+	FrameTypeSearchRequest  FrameType = 90
+	FrameTypeSearchResponse FrameType = 91
 )
 
 // Frame is the on-the-wire envelope. Payload encoding is type-specific

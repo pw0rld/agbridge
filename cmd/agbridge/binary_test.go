@@ -541,8 +541,7 @@ func TestBinaryFourToolsEndToEnd(t *testing.T) {
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Fatalf("exec exitcode: %v (full meta %+v)", meta["exitcode"], meta)
 	}
-	stdoutB64 := meta["stdout_b64"].(string)
-	stdout, _ := base64DecodeString(stdoutB64)
+	stdout := meta["stdout"].(string)
 	if !strings.Contains(stdout, "phase-B-binary") {
 		t.Errorf("exec stdout missing marker, got %q", stdout)
 	}
@@ -563,11 +562,16 @@ func TestBinaryFourToolsEndToEnd(t *testing.T) {
 	res = h.callTool(t, bridge, 4, "read_file", map[string]any{
 		"path": filepath.Join(h.scratchDir, "out.txt"),
 	})
+	// For UTF-8 content, the text body holds the file directly.
+	// For binary content, _meta.content_b64 is the fallback.
+	content := res["content"].([]any)
+	gotText := content[0].(map[string]any)["text"].(string)
+	if gotText != string(wantBytes) {
+		t.Errorf("read_file content mismatch: got %q want %q", gotText, wantBytes)
+	}
 	meta = res["_meta"].(map[string]any)
-	gotB64 := meta["content_b64"].(string)
-	got, _ := base64DecodeBytes(gotB64)
-	if string(got) != string(wantBytes) {
-		t.Errorf("read_file content mismatch: got %q want %q", got, wantBytes)
+	if int64(meta["size"].(float64)) != int64(len(wantBytes)) {
+		t.Errorf("read_file size: %v want %d", meta["size"], len(wantBytes))
 	}
 
 	// 4. port_forward (in-test echo server, daemon dials it through the

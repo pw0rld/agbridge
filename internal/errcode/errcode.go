@@ -2,10 +2,43 @@
 // bridge ↔ daemon path and surfaced to MCP agents via the _meta field.
 package errcode
 
+import "encoding/json"
+
 // Error is a structured failure record.
 type Error struct {
 	Code    string
 	Message string
+}
+
+// FramePayload is the wire shape for FrameTypeError payloads. New daemons
+// emit JSON; old daemons emit raw code strings — decoders handle both.
+type FramePayload struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// EncodeFramePayload serializes code + detail as JSON. The result is safe
+// to put on a proto.Frame{Type: FrameTypeError}.
+func EncodeFramePayload(code, detail string) []byte {
+	b, _ := json.Marshal(FramePayload{Code: code, Detail: detail})
+	return b
+}
+
+// DecodeFramePayload accepts either JSON ({"code":...,"detail":...}) or a
+// raw code string and returns (code, detail). Empty input returns
+// ("unknown", ""). This is the bridge-side counterpart to
+// EncodeFramePayload and keeps wire compatibility with pre-T5 daemons.
+func DecodeFramePayload(b []byte) (code, detail string) {
+	if len(b) == 0 {
+		return "unknown", ""
+	}
+	if b[0] == '{' {
+		var p FramePayload
+		if err := json.Unmarshal(b, &p); err == nil && p.Code != "" {
+			return p.Code, p.Detail
+		}
+	}
+	return string(b), ""
 }
 
 // Meta is the JSON-serializable shape attached to MCP tool responses

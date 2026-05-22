@@ -44,6 +44,35 @@ func (st *SessionTable) Register(s *Session) (int, func()) {
 	}
 }
 
+// ReplaceByRoleName drops any existing session matching s.Role + s.Name
+// before installing s. Returns the predecessor's conn (or nil), the new
+// session id, and the usual release function.
+//
+// The caller is responsible for closing the returned conn — typically
+// after sending a session_replaced error frame so the displaced peer
+// learns why it was severed (otherwise its supervisor would auto-reconnect
+// and trigger a kick-storm). See handleBridge in server.go.
+func (st *SessionTable) ReplaceByRoleName(s *Session) (replaced connIO, id int, release func()) {
+	st.mu.Lock()
+	for existingID, existing := range st.sessions {
+		if existing.Role == s.Role && existing.Name == s.Name {
+			replaced = existing.Conn
+			delete(st.sessions, existingID)
+			break
+		}
+	}
+	id = st.next
+	st.next++
+	st.sessions[id] = s
+	st.mu.Unlock()
+	release = func() {
+		st.mu.Lock()
+		delete(st.sessions, id)
+		st.mu.Unlock()
+	}
+	return
+}
+
 // Count returns the number of currently-registered sessions.
 func (st *SessionTable) Count() int {
 	st.mu.Lock()

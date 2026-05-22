@@ -46,11 +46,19 @@ func newCertGenCmd() *cobra.Command {
 			}
 			certPath := filepath.Join(outDir, "cert.pem")
 			keyPath := filepath.Join(outDir, "key.pem")
+			pinPath := filepath.Join(outDir, "pin.txt")
 			if err := os.WriteFile(certPath, out.CertPEM, 0o600); err != nil {
 				return fmt.Errorf("write cert: %w", err)
 			}
 			if err := os.WriteFile(keyPath, out.KeyPEM, 0o600); err != nil {
 				return fmt.Errorf("write key: %w", err)
+			}
+			// Persist the SHA-256 pin alongside cert.pem so operators
+			// (and gateway-setup.sh) can read it later without re-running
+			// `cert gen`. World-readable: it's a public commitment, not
+			// a secret. Newline-terminated for easy `cat pin.txt | xargs`.
+			if err := os.WriteFile(pinPath, []byte(out.Pin+"\n"), 0o644); err != nil {
+				return fmt.Errorf("write pin: %w", err)
 			}
 			if emitJSON {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]string{
@@ -59,8 +67,8 @@ func newCertGenCmd() *cobra.Command {
 					"pin":  out.Pin,
 				})
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "cert: %s\nkey:  %s\npin:  %s\n",
-				certPath, keyPath, out.Pin)
+			fmt.Fprintf(cmd.OutOrStdout(), "cert: %s\nkey:  %s\npin:  %s (also at %s)\n",
+				certPath, keyPath, out.Pin, pinPath)
 			return nil
 		},
 	}

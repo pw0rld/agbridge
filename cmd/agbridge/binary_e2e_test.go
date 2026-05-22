@@ -40,11 +40,7 @@ func TestBinaryE2EHappyPath(t *testing.T) {
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Fatalf("exec exitcode: %v (full meta %+v)", meta["exitcode"], meta)
 	}
-	stdoutB64 := meta["stdout_b64"].(string)
-	stdout, err := base64DecodeString(stdoutB64)
-	if err != nil {
-		t.Fatalf("decode stdout_b64: %v", err)
-	}
+	stdout := meta["stdout"].(string)
 	if !strings.Contains(stdout, "e2e-happy-path") {
 		t.Errorf("exec stdout missing E2E marker, got %q", stdout)
 	}

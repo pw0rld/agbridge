@@ -16,6 +16,11 @@ import (
 // ProtocolVersion echoed in initialize responses. Bumped as MCP evolves.
 const ProtocolVersion = "2024-11-05"
 
+// Version is the agbridge binary version surfaced in serverInfo. cmd/agbridge
+// overrides this at link time or via init in tests; default catches missed
+// wiring (won't show up in real builds).
+var Version = "0.0.0-unset"
+
 // jsonRPCMessage is the shape of both requests and responses on the wire.
 type jsonRPCMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -46,6 +51,12 @@ type Server struct {
 	mu    sync.Mutex
 	tools map[string]ToolHandler
 	specs map[string]ToolSpec
+
+	// writer is the current Serve()'s output stream. Held under writeMu so
+	// progress notifications emitted from in-flight tool handlers don't
+	// race with the main response writer.
+	writeMu sync.Mutex
+	writer  io.Writer
 }
 
 // NewServer constructs a fresh Server with no tools registered.
@@ -61,7 +72,14 @@ func NewServer() *Server {
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	enc := json.NewEncoder(w)
+	s.writeMu.Lock()
+	s.writer = w
+	s.writeMu.Unlock()
+	defer func() {
+		s.writeMu.Lock()
+		s.writer = nil
+		s.writeMu.Unlock()
+	}()
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -69,11 +87,11 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		line := scanner.Bytes()
 		var req jsonRPCMessage
 		if err := json.Unmarshal(line, &req); err != nil {
-			_ = enc.Encode(errorResp(nil, codeParse, "parse error"))
+			_ = s.writeJSON(errorResp(nil, codeParse, "parse error"))
 			continue
 		}
 		if req.JSONRPC != "2.0" {
-			_ = enc.Encode(errorResp(req.ID, codeInvalidRequest, "jsonrpc must be 2.0"))
+			_ = s.writeJSON(errorResp(req.ID, codeInvalidRequest, "jsonrpc must be 2.0"))
 			continue
 		}
 		resp := s.dispatch(ctx, req)
@@ -81,12 +99,34 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 			// notification — no response
 			continue
 		}
-		_ = enc.Encode(resp)
+		_ = s.writeJSON(resp)
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 	return nil
+}
+
+// writeJSON serializes one JSON-RPC message under the write lock. Safe to
+// call from any goroutine while Serve is running.
+func (s *Server) writeJSON(v any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.writer == nil {
+		return errors.New("mcp: not serving")
+	}
+	return json.NewEncoder(s.writer).Encode(v)
+}
+
+// notify writes a notification (no response expected) — used by progress
+// emitters during in-flight tool calls.
+func (s *Server) notify(method string, params any) {
+	b, err := json.Marshal(params)
+	if err != nil {
+		return
+	}
+	msg := jsonRPCMessage{JSONRPC: "2.0", Method: method, Params: b}
+	_ = s.writeJSON(msg)
 }
 
 func (s *Server) dispatch(ctx context.Context, req jsonRPCMessage) jsonRPCMessage {
@@ -97,7 +137,7 @@ func (s *Server) dispatch(ctx context.Context, req jsonRPCMessage) jsonRPCMessag
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo": map[string]any{"name": "agbridge", "version": "0.0.3"},
+			"serverInfo": map[string]any{"name": "agbridge", "version": Version},
 		})
 	case "tools/list":
 		return okResp(req.ID, s.listTools())

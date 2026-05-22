@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/signal"
-	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -21,12 +23,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -38,7 +43,10 @@ import (
 	"path/filepath"
 )
 
-const maxBufferedOutput = 10 << 20
+// maxBufferedOutput is the inline content cap for read_file and
+// download (without dest_path). var (not const) so smoke tests can
+// lower it; do not mutate at runtime in production.
+var maxBufferedOutput int64 = 10 << 20
 
 var errNoConn = errors.New("bridge: no active connection")
 
@@ -86,12 +94,21 @@ func newBridgeCmd() *cobra.Command {
 				os.Exit(0)
 			}()
 
-			go superviseBridgeConn(ctx, rt, cfg, tlsCfg)
+			go func() {
+				err := superviseBridgeConn(ctx, rt, cfg, tlsCfg)
+				if errors.Is(err, errEvicted) {
+					// EX_TEMPFAIL (75) — see errEvicted's doc. systemd
+					// users honour this with RestartPreventExitStatus=75.
+					os.Exit(75)
+				}
+			}()
 
 			srv := mcp.NewServer()
 			srv.RegisterTool(mcp.ToolSpec{
 				Name:        "exec",
-				Description: "Run a command on the remote daemon machine and return stdout/stderr/exitcode.",
+				Description: "Run a command on the remote daemon machine and return stdout/stderr/exitcode. " +
+					"stdout/stderr are emitted as plain text (`stdout`, `stderr` in _meta) when valid " +
+					"UTF-8; as base64 (`stdout_b64`, `stderr_b64`) otherwise — never both.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -106,31 +123,64 @@ func newBridgeCmd() *cobra.Command {
 			}, rt.execHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
-				Name:        "read_file",
-				Description: "Read a file on the remote daemon machine. Returns content + sha256 in _meta.",
+				Name: "read_file",
+				Description: "Read a file on the remote daemon machine. Returns content " +
+					"+ sha256 in _meta. offset+limit support partial reads — e.g. " +
+					"offset=1000, limit=500 returns 500 bytes starting at byte 1000. " +
+					"Use this to avoid loading whole large files into context. " +
+					"10 MB cap on returned content; larger files return " +
+					"exceeds_max_size (use offset+limit or download with dest_path). " +
+					"Emits MCP notifications/progress per chunk when the client " +
+					"supplies a progressToken in _meta.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":     map[string]any{"type": "string"},
 						"max_size": map[string]any{"type": "integer"},
+						"offset":   map[string]any{"type": "integer", "minimum": 0},
+						"limit":    map[string]any{"type": "integer", "minimum": 0},
 					},
 					"required": []string{"path"},
 				},
 			}, rt.readFileHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
-				Name:        "write_file",
-				Description: "Write a file on the remote daemon machine. content_b64 is base64-encoded content.",
+				Name: "write_file",
+				Description: "Write a file on the remote daemon machine. For " +
+					"text content, use `content` (raw string, recommended — " +
+					"saves tokens vs base64). For binary, use `content_b64` " +
+					"(base64). Exactly one of `content` / `content_b64` must " +
+					"be set. 10 MB cap on content size.",
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"path":        map[string]any{"type": "string"},
+						"content":     map[string]any{"type": "string"},
 						"content_b64": map[string]any{"type": "string"},
 						"mode":        map[string]any{"type": "integer"},
 					},
-					"required": []string{"path", "content_b64"},
+					"required": []string{"path"},
 				},
 			}, rt.writeFileHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "edit_file",
+				Description: "Partial edit: replace old_string with new_string in the " +
+					"file at path. Atomic. By default old_string must occur exactly once " +
+					"(returns ambiguous_match otherwise); set replace_all=true to replace " +
+					"every occurrence. Much cheaper than read_file + write_file for " +
+					"small changes to large files.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":        map[string]any{"type": "string"},
+						"old_string":  map[string]any{"type": "string"},
+						"new_string":  map[string]any{"type": "string"},
+						"replace_all": map[string]any{"type": "boolean"},
+					},
+					"required": []string{"path", "old_string", "new_string"},
+				},
+			}, rt.editFileHandler)
 
 			srv.RegisterTool(mcp.ToolSpec{
 				Name:        "port_forward",
@@ -145,6 +195,151 @@ func newBridgeCmd() *cobra.Command {
 					"required": []string{"remote_host", "remote_port"},
 				},
 			}, rt.portForwardHandler)
+
+			// Background process management — start/status/logs/kill/list
+			for _, spec := range bgExecTools(rt) {
+				srv.RegisterTool(spec.Spec, spec.Handler)
+			}
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "search",
+				Description: "Search file contents on the daemon machine. Pure-Go, " +
+					"replaces 'exec grep -rn' — no shell quoting, no cross-platform " +
+					"grep differences, structured [{file,line,column,snippet}] output. " +
+					"Skips .git / node_modules / vendor / __pycache__ / .next / dist / " +
+					"build / target / .venv / virtualenvs / IDE caches. Binary files " +
+					"auto-detected and skipped. Honors allowed_read_paths.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"pattern":          map[string]any{"type": "string"},
+						"path":             map[string]any{"type": "string"},
+						"regex":            map[string]any{"type": "boolean", "description": "default true; false = literal substring"},
+						"glob":             map[string]any{"type": "string", "description": "optional filename filter, e.g. *.go"},
+						"case_insensitive": map[string]any{"type": "boolean"},
+						"max_results":      map[string]any{"type": "integer", "minimum": 1, "description": "default 200"},
+						"max_files":        map[string]any{"type": "integer", "minimum": 1, "description": "default 10000"},
+					},
+					"required": []string{"pattern", "path"},
+				},
+			}, rt.searchHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "upload",
+				Description: "Transfer a file to the daemon machine. Three " +
+					"source modes (pick one via `source`): `local_path` — " +
+					"bridge reads from its own disk and streams " +
+					"(recommended for AI-generated files already written " +
+					"locally); `url` — daemon fetches from URL " +
+					"(recommended for content reachable by URL); `chunks` " +
+					"— inline base64 chunks (use only for small binary " +
+					"content the AI must embed inline). " +
+					"Optional `expected_sha256` validates content integrity " +
+					"before commit. Daemon writes atomically via temp + " +
+					"rename. 1 GiB total cap.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"dest_path":       map[string]any{"type": "string"},
+						"source":          map[string]any{"type": "string", "enum": []string{"chunks", "url", "local_path"}},
+						"chunks_b64":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"url":             map[string]any{"type": "string"},
+						"local_path":      map[string]any{"type": "string"},
+						"mode":            map[string]any{"type": "integer"},
+						"expected_size":   map[string]any{"type": "integer"},
+						"expected_sha256": map[string]any{"type": "string"},
+					},
+					"required": []string{"dest_path", "source"},
+				},
+			}, rt.uploadHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "download",
+				Description: "Stream a file from the daemon machine back to the AI " +
+					"client. With dest_path the bridge writes chunks straight to that " +
+					"local path and returns only metadata — use this for files larger " +
+					"than 10 MB, no inline cap applies. Without dest_path the content " +
+					"is returned inline (text if UTF-8, base64 otherwise), capped at " +
+					"10 MB; oversize inline requests return exceeds_max_size and ask " +
+					"the caller to retry with dest_path. Emits MCP " +
+					"notifications/progress per chunk when the client supplies a " +
+					"progressToken in _meta.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"src_path":  map[string]any{"type": "string"},
+						"dest_path": map[string]any{"type": "string"},
+						"offset":    map[string]any{"type": "integer", "minimum": 0},
+						"limit":     map[string]any{"type": "integer", "minimum": 0},
+					},
+					"required": []string{"src_path"},
+				},
+			}, rt.downloadHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "port_forward_list",
+				Description: "List active port-forwards established by this bridge. " +
+					"Returns [{local_port, remote_host, remote_port, opened_at}].",
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			}, rt.portForwardListHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "port_forward_close",
+				Description: "Close a single port-forward by local_port. The local " +
+					"TCP listener is shut down; in-flight connections drain.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"local_port": map[string]any{"type": "integer"},
+					},
+					"required": []string{"local_port"},
+				},
+			}, rt.portForwardCloseHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "list_directory",
+				Description: "List immediate children of a directory on the remote " +
+					"daemon machine. Non-recursive. Returns [{name, type, size, mode, " +
+					"mod_time}]. Use this instead of `exec ls` — cleaner output, no " +
+					"shell quoting concerns.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []string{"path"},
+				},
+			}, rt.listDirectoryHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "stat",
+				Description: "Metadata for a single path on the remote daemon — name, " +
+					"type (file/dir/symlink/other), size, mode, mod_time. Returns " +
+					"not_found if the path is absent. Useful for existence check + " +
+					"size lookup without reading file content.",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string"},
+					},
+					"required": []string{"path"},
+				},
+			}, rt.statHandler)
+
+			srv.RegisterTool(mcp.ToolSpec{
+				Name: "capabilities",
+				Description: "Return the daemon's sandbox + meta — allowed paths, " +
+					"forbidden ports, hostname, max file size, version. Call this " +
+					"once at the start of a session so subsequent tool calls don't " +
+					"have to discover constraints by trial and error.",
+				InputSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			}, rt.capabilitiesHandler)
 
 			err = srv.Serve(ctx, os.Stdin, os.Stdout)
 			// Closed-fd errors from SIGTERM-triggered stdin close are
@@ -211,15 +406,58 @@ type router struct {
 	session   *e2e.Session // active E2E session (nil before handshake / after disconnect)
 	sessionID [8]byte      // bound to session
 	pending   map[string]chan proto.Frame
+	forwards  map[int]*activeForward // local_port -> forward
+
+	// evicted is set when the gateway tells us a newer bridge with the
+	// same identity has taken over (errFrame "session_replaced"). The
+	// supervisor checks this on each runReader return to decide whether
+	// to reconnect or exit — reconnecting in this case would just kick
+	// the new bridge out and loop forever (F7 kick-storm).
+	evicted atomic.Bool
+
+	// sendMu serializes Encrypt + WSS Send so nonce consumption matches
+	// wire order. noise.CipherState.Encrypt is not concurrent-safe, and
+	// encrypting outside the WSS write lock would let goroutines reorder
+	// ciphertexts on the wire — the receiver's monotone recv counter
+	// would desync permanently. See F4 root cause and
+	// internal/e2e/session_concurrent_test.go.
+	sendMu sync.Mutex
+}
+
+// markIfEvicted flips the evicted flag if f is the gateway's eviction
+// signal. Returns true if it matched.
+func (r *router) markIfEvicted(f proto.Frame) bool {
+	if f.Type == proto.FrameTypeError && string(f.Payload) == "session_replaced" {
+		r.evicted.Store(true)
+		return true
+	}
+	return false
+}
+
+// wasEvicted reports whether this router has ever been displaced by a
+// newer bridge with the same identity. Once set, it stays set — there is
+// no recovery path; the supervisor must exit.
+func (r *router) wasEvicted() bool { return r.evicted.Load() }
+
+// activeForward tracks one live port_forward bound on the bridge side so
+// the lifecycle tools (port_forward_list / port_forward_close) can
+// inspect and tear it down without restarting the bridge.
+type activeForward struct {
+	LocalPort  int       `json:"local_port"`
+	RemoteHost string    `json:"remote_host"`
+	RemotePort int       `json:"remote_port"`
+	OpenedAt   int64     `json:"opened_at"` // unix seconds
+	ln         net.Listener
 }
 
 func newRouter(ctx context.Context, conn *wss.Conn, apiKey []byte, cfg *config.BridgeConfig) (*router, error) {
 	r := &router{
-		ctx:     ctx,
-		conn:    conn,
-		apiKey:  apiKey,
-		e2eMode: cfg.E2EMode,
-		pending: make(map[string]chan proto.Frame),
+		ctx:      ctx,
+		conn:     conn,
+		apiKey:   apiKey,
+		e2eMode:  cfg.E2EMode,
+		pending:  make(map[string]chan proto.Frame),
+		forwards: make(map[int]*activeForward),
 	}
 	if cfg.E2EMode != "disabled" {
 		sk, err := e2e.LoadStatic(cfg.BridgeStaticKeyPath)
@@ -282,6 +520,12 @@ func (r *router) sendInner(ctx context.Context, inner proto.Frame) error {
 	if err != nil {
 		return err
 	}
+
+	// Encrypt + WSS Send must be a single critical section so nonce
+	// consumption matches wire order. See sendMu comment on router.
+	r.sendMu.Lock()
+	defer r.sendMu.Unlock()
+
 	r.mu.Lock()
 	sess := r.session
 	sid := r.sessionID
@@ -423,22 +667,41 @@ func bridgeDialAndAttach(ctx context.Context, rt *router, cfg *config.BridgeConf
 	return nil
 }
 
+// errEvicted is returned by superviseBridgeConn when the gateway has told
+// us a newer bridge with the same identity has taken over. The caller in
+// runBridgeCommand exits the process with code 75 (EX_TEMPFAIL) so that
+// process supervisors (systemd, MCP clients) can distinguish "evicted —
+// don't restart" from "crashed — please restart". systemd users should
+// set RestartPreventExitStatus=75 to honor this.
+var errEvicted = errors.New("bridge evicted by newer instance with same identity")
+
 // superviseBridgeConn runs rt.runReader to completion (blocks until the
-// current conn dies), then loops via dialer.Loop to re-dial + re-handshake +
-// re-attach. In-flight tool calls are signalled via replaceConn(nil) so they
-// return network_lost(retryable=true). Exits when ctx cancels.
-func superviseBridgeConn(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) {
+// current conn dies), then loops via dialer.Loop to re-dial + re-handshake
+// + re-attach. In-flight tool calls are signalled via replaceConn(nil) so
+// they return network_lost(retryable=true).
+//
+// Returns:
+//   - errEvicted if the gateway sent session_replaced (newer bridge took
+//     over with the same identity — must NOT reconnect, that would kick
+//     the new bridge back out and storm)
+//   - ctx.Err() if the caller cancelled (clean shutdown)
+//   - the dialer error if reconnection ultimately failed
+func superviseBridgeConn(ctx context.Context, rt *router, cfg *config.BridgeConfig, tlsCfg *tls.Config) error {
 	for {
 		rt.runReader()
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
+		}
+		if rt.wasEvicted() {
+			fmt.Fprintln(os.Stderr, "bridge: evicted by newer instance with same identity — exiting")
+			return errEvicted
 		}
 		fmt.Fprintln(os.Stderr, "bridge: connection lost, reconnecting…")
 		rt.replaceConn(nil)
 		if err := dialer.Loop(ctx, func(c context.Context) error {
 			return bridgeDialAndAttach(c, rt, cfg, tlsCfg)
 		}, dialer.Options{}); err != nil {
-			return
+			return err
 		}
 		fmt.Fprintln(os.Stderr, "bridge: reconnected")
 	}
@@ -459,6 +722,13 @@ func (r *router) runReader() {
 		f, err := conn.Recv(r.ctx)
 		if err != nil {
 			return
+		}
+		if r.markIfEvicted(f) {
+			// Set the flag and keep reading; the gateway is about to
+			// close the conn, so the next Recv will return and the
+			// supervisor will see wasEvicted and exit instead of
+			// reconnecting.
+			continue
 		}
 		if f.Type != proto.FrameTypeRoute {
 			continue
@@ -515,6 +785,7 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 	}
+	emit := mcp.EmitterFromContext(ctx)
 	reqID := newReqID()
 	req := execproto.ExecRequest{
 		Cmd: args.Cmd, Args: args.Args, Cwd: args.Cwd, Env: args.Env, TimeoutMs: args.TimeoutMs,
@@ -550,14 +821,19 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 				if c.Stream == "stderr" {
 					dst = &stderr
 				}
-				if dst.Len()+len(c.Data) > maxBufferedOutput {
-					n := maxBufferedOutput - dst.Len()
+				if int64(dst.Len())+int64(len(c.Data)) > maxBufferedOutput {
+					n := maxBufferedOutput - int64(dst.Len())
 					if n > 0 {
-						dst.Write(c.Data[:n])
+						dst.Write(c.Data[:int(n)])
 					}
 				} else {
 					dst.Write(c.Data)
 				}
+				// Forward this chunk to the MCP client as a progress
+				// notification. Total bytes received so far is "progress";
+				// the chunk text is the message body. When the client
+				// didn't request progress, this is a no-op.
+				emit(float64(stdout.Len()+stderr.Len()), nil, string(c.Data))
 			case proto.FrameTypeExecComplete:
 				c, err := execproto.DecodeExecComplete(f.Payload)
 				if err != nil {
@@ -565,31 +841,71 @@ func (r *router) execHandler(ctx context.Context, raw json.RawMessage) (any, err
 				}
 				return buildExecResult(stdout.String(), stderr.String(), c), nil
 			case proto.FrameTypeError:
-				return mcpErrorResult(errcode.New(string(f.Payload), "daemon error")), nil
+				code, detail := errcode.DecodeFramePayload(f.Payload)
+				msg := "exec: " + code
+				if detail != "" {
+					msg = msg + " (" + detail + ")"
+				}
+				return mcpErrorResult(errcode.New(code, msg)), nil
 			}
 		}
 	}
 }
 
 func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
-	text := fmt.Sprintf("exitcode=%d duration_ms=%d\n--- stdout ---\n%s--- stderr ---\n%s",
-		c.ExitCode, c.DurationMs, stdout, stderr)
+	meta := map[string]any{
+		"exitcode":    c.ExitCode,
+		"duration_ms": c.DurationMs,
+		"timed_out":   c.TimedOut,
+		"truncated":   c.Truncated,
+	}
+	stdoutUTF8 := utf8.ValidString(stdout)
+	stderrUTF8 := utf8.ValidString(stderr)
+	// F9: emit text OR b64, never both. Text saves ~33% tokens; b64
+	// only when the bytes can't safely live in a JSON string.
+	if stdoutUTF8 {
+		meta["stdout"] = stdout
+	} else {
+		meta["stdout_b64"] = base64.StdEncoding.EncodeToString([]byte(stdout))
+	}
+	if stderrUTF8 {
+		meta["stderr"] = stderr
+	} else {
+		meta["stderr_b64"] = base64.StdEncoding.EncodeToString([]byte(stderr))
+	}
+
+	// content[0].text: prioritize stdout (the usual interest) and only fall
+	// through to stderr when stdout is empty. Non-zero exitcode prepends a
+	// short status line so AI agents notice failures without parsing _meta.
+	var text string
+	body := stdout
+	if !stdoutUTF8 {
+		body = fmt.Sprintf("(stdout: %d binary bytes — see _meta.stdout_b64)", len(stdout))
+	}
+	if body == "" && stderr != "" {
+		body = stderr
+		if !stderrUTF8 {
+			body = fmt.Sprintf("(stderr: %d binary bytes — see _meta.stderr_b64)", len(stderr))
+		}
+	}
+	if c.ExitCode != 0 {
+		text = fmt.Sprintf("exitcode=%d duration_ms=%d\n%s", c.ExitCode, c.DurationMs, body)
+		if stderr != "" && stderrUTF8 && stdout != "" {
+			text += "\n--- stderr ---\n" + stderr
+		}
+	} else {
+		text = body
+	}
+
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
-		"_meta": map[string]any{
-			"exitcode":    c.ExitCode,
-			"duration_ms": c.DurationMs,
-			"timed_out":   c.TimedOut,
-			"truncated":   c.Truncated,
-			"stdout_b64":  base64.StdEncoding.EncodeToString([]byte(stdout)),
-			"stderr_b64":  base64.StdEncoding.EncodeToString([]byte(stderr)),
-		},
+		"_meta":   meta,
 	}
 	if c.TimedOut {
 		result["isError"] = true
 		errMeta := errcode.New("exec_timeout", "subprocess exceeded timeout_ms").ToMCPMeta()
 		for k, v := range metaToMap(errMeta) {
-			result["_meta"].(map[string]any)[k] = v
+			meta[k] = v
 		}
 	}
 	return result
@@ -598,6 +914,8 @@ func buildExecResult(stdout, stderr string, c execproto.ExecComplete) any {
 type readFileArgs struct {
 	Path    string `json:"path"`
 	MaxSize int    `json:"max_size"`
+	Offset  int64  `json:"offset"`
+	Limit   int64  `json:"limit"`
 }
 
 func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -609,7 +927,9 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
 	reqID := newReqID()
-	reqJSON, _ := fileproto.FileReadRequest{Path: args.Path, MaxSize: args.MaxSize}.Encode()
+	reqJSON, _ := fileproto.FileReadRequest{
+		Path: args.Path, MaxSize: args.MaxSize, Offset: args.Offset, Limit: args.Limit,
+	}.Encode()
 
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
@@ -618,6 +938,8 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
+	emit := mcp.EmitterFromContext(ctx)
+	var bytesReceived int64
 	var content []byte
 	for {
 		select {
@@ -633,10 +955,15 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 				if err != nil {
 					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 				}
-				if len(content)+len(c.Data) > maxBufferedOutput {
+				if int64(len(content))+int64(len(c.Data)) > maxBufferedOutput {
 					return mcpErrorResult(errcode.New("exceeds_max_size", "file exceeds 10 MB cap")), nil
 				}
 				content = append(content, c.Data...)
+				// Skip emit for EOF sentinels (Data==nil, Eof==true); only data-bearing chunks advance progress.
+				if len(c.Data) > 0 {
+					bytesReceived += int64(len(c.Data))
+					emit(float64(bytesReceived), nil, "")
+				}
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(f.Payload)
 				return buildReadFileResult(content, c), nil
@@ -649,28 +976,37 @@ func (r *router) readFileHandler(ctx context.Context, raw json.RawMessage) (any,
 
 func buildReadFileResult(content []byte, c fileproto.FileComplete) any {
 	if c.Err != "" {
-		return mcpErrorResult(errcode.New(c.Err, "read_file: "+c.Err))
+		msg := "read_file: " + c.Err
+		if c.ErrDetail != "" {
+			msg = msg + " (" + c.ErrDetail + ")"
+		}
+		return mcpErrorResult(errcode.New(c.Err, msg))
+	}
+	meta := map[string]any{
+		"size":   c.Size,
+		"sha256": c.Sha256,
 	}
 	var text string
 	if utf8.Valid(content) {
 		text = string(content)
 	} else {
+		// Binary file: emit base64 only when not UTF-8. Text reads
+		// (the common case) skip this — halving JSON payload size and
+		// making MCP-client parsing much faster.
 		text = fmt.Sprintf("(binary %d bytes, sha256=%s)", c.Size, c.Sha256)
+		meta["content_b64"] = base64.StdEncoding.EncodeToString(content)
 	}
 	return map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
-		"_meta": map[string]any{
-			"size":        c.Size,
-			"sha256":      c.Sha256,
-			"content_b64": base64.StdEncoding.EncodeToString(content),
-		},
+		"_meta":   meta,
 	}
 }
 
 type writeFileArgs struct {
-	Path       string `json:"path"`
-	ContentB64 string `json:"content_b64"`
-	Mode       uint32 `json:"mode"`
+	Path       string  `json:"path"`
+	Content    *string `json:"content"`
+	ContentB64 *string `json:"content_b64"`
+	Mode       uint32  `json:"mode"`
 }
 
 const writeChunkSize = 64 * 1024
@@ -683,11 +1019,25 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 	if args.Path == "" {
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
-	content, err := base64.StdEncoding.DecodeString(args.ContentB64)
-	if err != nil {
-		return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
+	hasContent := args.Content != nil
+	hasB64 := args.ContentB64 != nil
+	if hasContent && hasB64 {
+		return mcpErrorResult(errcode.New("bad_payload", "only one of content / content_b64 may be set")), nil
 	}
-	if len(content) > maxBufferedOutput {
+	if !hasContent && !hasB64 {
+		return mcpErrorResult(errcode.New("bad_payload", "content or content_b64 required")), nil
+	}
+	var content []byte
+	if hasContent {
+		content = []byte(*args.Content)
+	} else {
+		var err error
+		content, err = base64.StdEncoding.DecodeString(*args.ContentB64)
+		if err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "content_b64: "+err.Error())), nil
+		}
+	}
+	if int64(len(content)) > maxBufferedOutput {
 		return mcpErrorResult(errcode.New("exceeds_max_size", "content exceeds 10 MB cap")), nil
 	}
 
@@ -729,11 +1079,20 @@ func (r *router) writeFileHandler(ctx context.Context, raw json.RawMessage) (any
 			case proto.FrameTypeFileComplete:
 				c, _ := fileproto.DecodeFileComplete(f.Payload)
 				if c.Err != "" {
-					return mcpErrorResult(errcode.New(c.Err, "write_file: "+c.Err)), nil
+					msg := "write_file: " + c.Err
+					if c.ErrDetail != "" {
+						msg = msg + " (" + c.ErrDetail + ")"
+					}
+					return mcpErrorResult(errcode.New(c.Err, msg)), nil
 				}
 				return map[string]any{
 					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("wrote %d bytes (sha256=%s)", c.Size, c.Sha256)}},
 					"_meta": map[string]any{
+						// `size` matches read_file's _meta key so AI agents
+						// can use one name across all file ops.
+						// `bytes_written` retained for backward-compat with
+						// existing integration tests; treat as deprecated.
+						"size":          c.Size,
 						"bytes_written": c.Size,
 						"sha256":        c.Sha256,
 					},
@@ -776,13 +1135,90 @@ func (r *router) portForwardHandler(ctx context.Context, raw json.RawMessage) (a
 		return mcpErrorResult(errcode.New("listen_failed", err.Error())), nil
 	}
 	tcpAddr := ln.Addr().(*net.TCPAddr)
+	fwd := &activeForward{
+		LocalPort:  tcpAddr.Port,
+		RemoteHost: args.RemoteHost,
+		RemotePort: args.RemotePort,
+		OpenedAt:   time.Now().Unix(),
+		ln:         ln,
+	}
+	r.mu.Lock()
+	r.forwards[tcpAddr.Port] = fwd
+	r.mu.Unlock()
 	go r.portForwardAcceptLoop(ctx, ln, args.RemoteHost, args.RemotePort)
+	go func() {
+		<-ctx.Done()
+		r.mu.Lock()
+		delete(r.forwards, tcpAddr.Port)
+		r.mu.Unlock()
+	}()
 	text := fmt.Sprintf("listening on %s:%d → %s:%d", portForwardListenHost, tcpAddr.Port, args.RemoteHost, args.RemotePort)
 	return map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"_meta": map[string]any{
 			"local_host": portForwardListenHost,
 			"local_port": tcpAddr.Port,
+		},
+	}, nil
+}
+
+func (r *router) portForwardListHandler(_ context.Context, _ json.RawMessage) (any, error) {
+	r.mu.Lock()
+	out := make([]activeForward, 0, len(r.forwards))
+	for _, f := range r.forwards {
+		out = append(out, activeForward{
+			LocalPort:  f.LocalPort,
+			RemoteHost: f.RemoteHost,
+			RemotePort: f.RemotePort,
+			OpenedAt:   f.OpenedAt,
+		})
+	}
+	r.mu.Unlock()
+	var b strings.Builder
+	for _, f := range out {
+		b.WriteString(fmt.Sprintf("  127.0.0.1:%d → %s:%d (opened %d)\n",
+			f.LocalPort, f.RemoteHost, f.RemotePort, f.OpenedAt))
+	}
+	if b.Len() == 0 {
+		b.WriteString("(no active forwards)")
+	}
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": b.String()}},
+		"_meta":   map[string]any{"forwards": out, "count": len(out)},
+	}, nil
+}
+
+type portForwardCloseArgs struct {
+	LocalPort int `json:"local_port"`
+}
+
+func (r *router) portForwardCloseHandler(_ context.Context, raw json.RawMessage) (any, error) {
+	var args portForwardCloseArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.LocalPort == 0 {
+		return mcpErrorResult(errcode.New("bad_payload", "local_port required")), nil
+	}
+	r.mu.Lock()
+	fwd, ok := r.forwards[args.LocalPort]
+	if ok {
+		delete(r.forwards, args.LocalPort)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return mcpErrorResult(errcode.New("not_found", fmt.Sprintf("no active forward on local_port=%d", args.LocalPort))), nil
+	}
+	_ = fwd.ln.Close()
+	return map[string]any{
+		"content": []any{map[string]any{
+			"type": "text",
+			"text": fmt.Sprintf("closed forward on 127.0.0.1:%d (was → %s:%d)", fwd.LocalPort, fwd.RemoteHost, fwd.RemotePort),
+		}},
+		"_meta": map[string]any{
+			"local_port":  fwd.LocalPort,
+			"remote_host": fwd.RemoteHost,
+			"remote_port": fwd.RemotePort,
 		},
 	}, nil
 }
@@ -818,6 +1254,19 @@ func (r *router) portForwardStream(ctx context.Context, conn net.Conn, host stri
 	for {
 		select {
 		case <-ackCtx.Done():
+			// Daemon didn't ack within the window — its handleStreamOpen
+			// is presumably stuck (slow dial, target overloaded, …) and
+			// its slot is still registered. Send StreamClose so the
+			// daemon can cancel its streamCtx and release the local
+			// TCP socket; otherwise the goroutine + fd leak on every
+			// stalled stream. Use context.Background() because the
+			// outer ctx may have been cancelled.
+			closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
+			_ = r.sendInner(context.Background(), proto.Frame{
+				Type:    proto.FrameTypeStreamClose,
+				ReqID:   streamID,
+				Payload: closePayload,
+			})
 			return
 		case f, ok := <-ch:
 			if !ok {
@@ -885,6 +1334,597 @@ connected:
 
 	closePayload, _ := streamproto.StreamClose{StreamID: streamID}.Encode()
 	_ = r.sendInner(context.Background(), proto.Frame{Type: proto.FrameTypeStreamClose, ReqID: streamID, Payload: closePayload})
+}
+
+type editFileArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+func (r *router) editFileHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args editFileArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	if args.OldString == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "old_string is required and must not be empty")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fileproto.FileEditRequest{
+		Path: args.Path, OldString: args.OldString, NewString: args.NewString, ReplaceAll: args.ReplaceAll,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileEditRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeFileComplete:
+			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			if c.Err != "" {
+				msg := "edit_file: " + c.Err
+				if c.ErrDetail != "" {
+					msg = msg + " (" + c.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(c.Err, msg)), nil
+			}
+			text := fmt.Sprintf("edited %d bytes (sha256=%s)", c.Size, c.Sha256)
+			if c.BackupPath != "" {
+				text += "\nbackup: " + c.BackupPath
+			}
+			meta := map[string]any{
+				"size":   c.Size,
+				"sha256": c.Sha256,
+			}
+			if c.BackupPath != "" {
+				meta["backup_path"] = c.BackupPath
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": text}},
+				"_meta":   meta,
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "edit_file: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type searchArgs struct {
+	Pattern         string `json:"pattern"`
+	Path            string `json:"path"`
+	Regex           *bool  `json:"regex,omitempty"` // pointer to detect omitted
+	Glob            string `json:"glob,omitempty"`
+	CaseInsensitive bool   `json:"case_insensitive,omitempty"`
+	MaxResults      int    `json:"max_results,omitempty"`
+	MaxFiles        int    `json:"max_files,omitempty"`
+}
+
+func (r *router) searchHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args searchArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Pattern == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "pattern required")), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path required")), nil
+	}
+	// Default regex=true when not specified
+	regexMode := true
+	if args.Regex != nil {
+		regexMode = *args.Regex
+	}
+	req := searchproto.SearchRequest{
+		Pattern: args.Pattern, Path: args.Path, Regex: regexMode,
+		Glob: args.Glob, CaseInsensitive: args.CaseInsensitive,
+		MaxResults: args.MaxResults, MaxFiles: args.MaxFiles,
+	}
+	reqID := newReqID()
+	reqJSON, _ := req.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeSearchResponse:
+			resp, _ := searchproto.DecodeSearchResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "search: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			var b strings.Builder
+			for _, m := range resp.Results {
+				b.WriteString(fmt.Sprintf("%s:%d:%d: %s\n", m.File, m.Line, m.Column, m.Snippet))
+			}
+			if b.Len() == 0 {
+				b.WriteString(fmt.Sprintf("(no matches in %d files)", resp.TotalFilesSearched))
+			} else if resp.Truncated {
+				b.WriteString(fmt.Sprintf("--- showing %d of %d matches (truncated) ---\n",
+					len(resp.Results), resp.TotalMatched))
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": b.String()}},
+				"_meta": map[string]any{
+					"results":              resp.Results,
+					"total_matched":        resp.TotalMatched,
+					"total_files_searched": resp.TotalFilesSearched,
+					"truncated":            resp.Truncated,
+					"duration_ms":          resp.DurationMs,
+				},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "search: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type uploadArgs struct {
+	DestPath       string   `json:"dest_path"`
+	Source         string   `json:"source"`
+	ChunksB64      []string `json:"chunks_b64,omitempty"`
+	URL            string   `json:"url,omitempty"`
+	LocalPath      string   `json:"local_path,omitempty"`
+	Mode           uint32   `json:"mode,omitempty"`
+	ExpectedSize   int64    `json:"expected_size,omitempty"`
+	ExpectedSha256 string   `json:"expected_sha256,omitempty"`
+}
+
+func (r *router) uploadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args uploadArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.DestPath == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "dest_path required")), nil
+	}
+	switch args.Source {
+	case "chunks":
+		if len(args.ChunksB64) == 0 {
+			return mcpErrorResult(errcode.New("bad_payload", "chunks_b64 must be non-empty for source=chunks")), nil
+		}
+	case "url":
+		if args.URL == "" {
+			return mcpErrorResult(errcode.New("bad_payload", "url required for source=url")), nil
+		}
+	case "local_path":
+		if args.LocalPath == "" {
+			return mcpErrorResult(errcode.New("bad_payload", "local_path required for source=local_path")), nil
+		}
+		if _, err := os.Stat(args.LocalPath); err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "local_path: "+err.Error())), nil
+		}
+	default:
+		return mcpErrorResult(errcode.New("bad_payload", "source must be 'chunks', 'url', or 'local_path'")), nil
+	}
+
+	reqID := newReqID()
+	// For local_path, the bridge reads the file locally and streams chunks to
+	// the daemon — from the daemon's perspective this is a "chunks" upload.
+	daemonSource := args.Source
+	if daemonSource == "local_path" {
+		daemonSource = "chunks"
+	}
+	reqJSON, _ := fileproto.UploadRequest{
+		DestPath:       args.DestPath,
+		Mode:           args.Mode,
+		Source:         daemonSource,
+		URL:            args.URL,
+		ExpectedSize:   args.ExpectedSize,
+		ExpectedSha256: args.ExpectedSha256,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeUploadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	// For chunks source, stream the base64 chunks now. Last one with Eof=true.
+	if args.Source == "chunks" {
+		for i, c := range args.ChunksB64 {
+			data, err := base64.StdEncoding.DecodeString(c)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", fmt.Sprintf("chunks_b64[%d]: %v", i, err))), nil
+			}
+			eof := i == len(args.ChunksB64)-1
+			if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+			}
+		}
+	}
+
+	// For local_path source, open the file and stream 1 MiB chunks.
+	if args.Source == "local_path" {
+		f, err := os.Open(args.LocalPath)
+		if err != nil {
+			return mcpErrorResult(errcode.New("bad_payload", "open local_path: "+err.Error())), nil
+		}
+		defer f.Close()
+		const chunkSize = 1 << 20
+		buf := make([]byte, chunkSize)
+		for {
+			n, rerr := f.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				eof := rerr == io.EOF
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+				}
+				if eof {
+					break
+				}
+			}
+			if rerr == io.EOF {
+				// Zero-length file: send a single empty Eof chunk so daemon closes the write cleanly.
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}); err != nil {
+					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+				}
+				break
+			}
+			if rerr != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "local_path read: "+rerr.Error())), nil
+			}
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeFileComplete:
+			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			if c.Err != "" {
+				msg := "upload: " + c.Err
+				if c.ErrDetail != "" {
+					msg = msg + " (" + c.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(c.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text",
+					"text": fmt.Sprintf("uploaded %d bytes to %s (sha256=%s)", c.Size, args.DestPath, c.Sha256)}},
+				"_meta": map[string]any{
+					"size":      c.Size,
+					"sha256":    c.Sha256,
+					"dest_path": args.DestPath,
+				},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "upload: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+type downloadArgs struct {
+	SrcPath  string `json:"src_path"`
+	DestPath string `json:"dest_path,omitempty"`
+	Offset   int64  `json:"offset,omitempty"`
+	Limit    int64  `json:"limit,omitempty"`
+}
+
+func (r *router) downloadHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args downloadArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.SrcPath == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "src_path required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fileproto.DownloadRequest{
+		SrcPath: args.SrcPath, Offset: args.Offset, Limit: args.Limit,
+	}.Encode()
+
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeDownloadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	emit := mcp.EmitterFromContext(ctx)
+	var bytesReceived int64
+
+	// If dest_path supplied, stream to local file (no buffering all in
+	// memory). Otherwise buffer and return inline.
+	var (
+		f       *os.File
+		content []byte
+	)
+	if args.DestPath != "" {
+		var err error
+		f, err = os.Create(args.DestPath)
+		if err != nil {
+			return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
+		}
+		defer f.Close()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+		case fr, ok := <-ch:
+			if !ok {
+				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+			}
+			switch fr.Type {
+			case proto.FrameTypeFileChunk:
+				c, err := fileproto.DecodeFileChunk(fr.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+				}
+				if f != nil {
+					if _, err := f.Write(c.Data); err != nil {
+						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
+					}
+				} else {
+					if int64(len(content))+int64(len(c.Data)) > maxBufferedOutput {
+						return mcpErrorResult(errcode.New("exceeds_max_size",
+							"download without dest_path exceeds 10 MB cap; pass dest_path to stream to disk")), nil
+					}
+					content = append(content, c.Data...)
+				}
+				// Skip emit for EOF sentinels (Data==nil, Eof==true); only data-bearing chunks advance progress.
+				if len(c.Data) > 0 {
+					bytesReceived += int64(len(c.Data))
+					emit(float64(bytesReceived), nil, "")
+				}
+			case proto.FrameTypeFileComplete:
+				c, _ := fileproto.DecodeFileComplete(fr.Payload)
+				if c.Err != "" {
+					msg := "download: " + c.Err
+					if c.ErrDetail != "" {
+						msg = msg + " (" + c.ErrDetail + ")"
+					}
+					return mcpErrorResult(errcode.New(c.Err, msg)), nil
+				}
+				meta := map[string]any{
+					"size":     c.Size,
+					"sha256":   c.Sha256,
+					"src_path": args.SrcPath,
+				}
+				var text string
+				if args.DestPath != "" {
+					meta["dest_path"] = args.DestPath
+					text = fmt.Sprintf("downloaded %d bytes to %s (sha256=%s)", c.Size, args.DestPath, c.Sha256)
+				} else if utf8.Valid(content) {
+					text = string(content)
+				} else {
+					meta["content_b64"] = base64.StdEncoding.EncodeToString(content)
+					text = fmt.Sprintf("(binary %d bytes, sha256=%s)", c.Size, c.Sha256)
+				}
+				return map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": text}},
+					"_meta":   meta,
+				}, nil
+			case proto.FrameTypeError:
+				code, detail := errcode.DecodeFramePayload(fr.Payload)
+				msg := "download: " + code
+				if detail != "" {
+					msg = msg + " (" + detail + ")"
+				}
+				return mcpErrorResult(errcode.New(code, msg)), nil
+			}
+		}
+	}
+}
+
+type pathOnlyArgs struct {
+	Path string `json:"path"`
+}
+
+func (r *router) listDirectoryHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args pathOnlyArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fsproto.ListDirRequest{Path: args.Path}.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeListDirResponse:
+			resp, _ := fsproto.DecodeListDirResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "list_directory: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": renderListDir(resp)}},
+				"_meta":   map[string]any{"entries": resp.Entries, "count": len(resp.Entries)},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "list_directory: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+func (r *router) statHandler(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args pathOnlyArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+	}
+	if args.Path == "" {
+		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
+	}
+	reqID := newReqID()
+	reqJSON, _ := fsproto.StatRequest{Path: args.Path}.Encode()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeStatResponse:
+			resp, _ := fsproto.DecodeStatResponse(f.Payload)
+			if resp.Err != "" {
+				msg := "stat: " + resp.Err
+				if resp.ErrDetail != "" {
+					msg = msg + " (" + resp.ErrDetail + ")"
+				}
+				return mcpErrorResult(errcode.New(resp.Err, msg)), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf(
+					"name=%s type=%s size=%d mode=%o mod_time=%d",
+					resp.Entry.Name, resp.Entry.Type, resp.Entry.Size, resp.Entry.Mode, resp.Entry.ModTime,
+				)}},
+				"_meta": map[string]any{"entry": resp.Entry},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "stat: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame %d", f.Type))), nil
+	}
+}
+
+func renderListDir(resp fsproto.ListDirResponse) string {
+	var b strings.Builder
+	for _, e := range resp.Entries {
+		b.WriteString(fmt.Sprintf("%-4s %10d %o %s\n", e.Type, e.Size, e.Mode, e.Name))
+	}
+	if b.Len() == 0 {
+		return "(empty directory)"
+	}
+	return b.String()
+}
+
+// capabilitiesHandler sends a FrameTypeCapabilitiesRequest to the daemon
+// and returns the daemon's policy snapshot as an MCP tool result. The
+// JSON payload is exposed verbatim under `_meta.capabilities` so AI
+// agents can parse it, plus a human-readable text body.
+func (r *router) capabilitiesHandler(ctx context.Context, _ json.RawMessage) (any, error) {
+	reqID := newReqID()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesRequest, ReqID: reqID}); err != nil {
+		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return mcpErrorResult(errcode.New("network_lost", "context cancelled")), nil
+	case f, ok := <-ch:
+		if !ok {
+			return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
+		}
+		switch f.Type {
+		case proto.FrameTypeCapabilitiesResponse:
+			caps, err := capabilities.Decode(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
+			}
+			return map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": renderCapabilities(caps)}},
+				"_meta":   map[string]any{"capabilities": caps},
+			}, nil
+		case proto.FrameTypeError:
+			code, detail := errcode.DecodeFramePayload(f.Payload)
+			msg := "capabilities: " + code
+			if detail != "" {
+				msg = msg + " (" + detail + ")"
+			}
+			return mcpErrorResult(errcode.New(code, msg)), nil
+		}
+		return mcpErrorResult(errcode.New("protocol_error", fmt.Sprintf("unexpected frame type %d", f.Type))), nil
+	}
+}
+
+func renderCapabilities(c capabilities.Capabilities) string {
+	return fmt.Sprintf(
+		"daemon=%s hostname=%s version=%s\nallowed_exec_cwds=%v\nallowed_read_paths=%v\nallowed_write_paths=%v\nenv_allowlist=%v\nforbidden_ports=%v\nmax_file_bytes=%d",
+		c.DaemonName, c.DaemonHostname, c.AgbridgeVersion,
+		c.AllowedExecCwds, c.AllowedReadPaths, c.AllowedWritePaths,
+		c.EnvAllowlist, c.ForbiddenPorts, c.MaxFileBytes,
+	)
 }
 
 func mcpErrorResult(e errcode.Error) map[string]any {
