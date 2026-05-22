@@ -16,7 +16,7 @@ import (
 // not_a_directory, or read_failed. The Err field is also set when the
 // underlying readdir returns a partial error.
 func ListDirectory(req fsproto.ListDirRequest, allowedPaths []string) fsproto.ListDirResponse {
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return fsproto.ListDirResponse{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
@@ -55,7 +55,7 @@ func ListDirectory(req fsproto.ListDirRequest, allowedPaths []string) fsproto.Li
 
 // Stat returns metadata for a single path. Honors allowed_read_paths.
 func Stat(req fsproto.StatRequest, allowedPaths []string) fsproto.StatResponse {
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return fsproto.StatResponse{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),

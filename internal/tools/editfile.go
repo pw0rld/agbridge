@@ -75,7 +75,7 @@ func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths [
 			ErrDetail: "old_string must not be empty (would match every position)",
 		}, nil
 	}
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return fileproto.FileComplete{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),

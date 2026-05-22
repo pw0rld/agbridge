@@ -25,7 +25,7 @@ type ChunkSource func() (fileproto.FileChunk, error)
 // file is never partially overwritten — failures leave the original (if any)
 // in place.
 func WriteFile(ctx context.Context, req fileproto.FileWriteRequest, allowedPaths []string, maxBytes int64, nextChunk ChunkSource) (fileproto.FileComplete, error) {
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return fileproto.FileComplete{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),

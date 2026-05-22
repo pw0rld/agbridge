@@ -149,7 +149,7 @@ func (r *BgRegistry) StartBg(req bgproto.BgExecRequest, allowedCwds, envAllowlis
 	if req.Cwd == "" {
 		return bgproto.BgExecResponse{Action: "start", Err: "bad_payload", ErrDetail: "cwd required"}
 	}
-	if !sandbox.PathAllowed(req.Cwd, allowedCwds) {
+	if _, ok := sandbox.PathAllowedResolved(req.Cwd, allowedCwds); !ok {
 		return bgproto.BgExecResponse{
 			Action:    "start",
 			Err:       "path_forbidden",
