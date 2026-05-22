@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,6 +112,157 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 	if f.Type != proto.FrameTypeError {
 		t.Errorf("got %v, want Error", f.Type)
 	}
+}
+
+// TestBridgeDuplicateIdentitySendsSessionReplaced verifies F7: when a
+// second bridge with the same (name, api_key) connects, the gateway sends
+// a session_replaced error frame to the older bridge before closing its
+// conn. Without this signal the older bridge's supervisor would
+// auto-reconnect and enter a kick-storm with the newer instance.
+func TestBridgeDuplicateIdentitySendsSessionReplaced(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := audit.Open(filepath.Join(t.TempDir(), "a.jsonl"))
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer w.Close()
+	cfg := newTestConfig(t)
+	inst, err := Run(ctx, srvCfg, cfg, w)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
+
+	// Bring up a daemon so the bridges' handleBridge stays in its read
+	// loop (without one, both would early-exit with daemon_offline before
+	// the replace path is exercised).
+	daemonConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	defer daemonConn.Close()
+	sendHello(t, ctx, daemonConn, handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1"})
+	if ack, err := daemonConn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon hello ack: %v %v", err, ack.Type)
+	}
+
+	// Bridge A — first to arrive.
+	bridgeA, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("bridgeA dial: %v", err)
+	}
+	defer bridgeA.Close()
+	sendHello(t, ctx, bridgeA, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
+	if ack, err := bridgeA.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridgeA hello ack: %v %v", err, ack.Type)
+	}
+
+	// Bridge B — same identity, displaces A.
+	bridgeB, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("bridgeB dial: %v", err)
+	}
+	defer bridgeB.Close()
+	sendHello(t, ctx, bridgeB, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
+	if ack, err := bridgeB.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridgeB hello ack: %v %v", err, ack.Type)
+	}
+
+	// A must receive a session_replaced error frame, then its conn must
+	// close. Allow a generous deadline so the test isn't flaky on slow CI.
+	deadline, dcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer dcancel()
+	f, err := bridgeA.Recv(deadline)
+	if err != nil {
+		t.Fatalf("bridgeA recv: %v", err)
+	}
+	if f.Type != proto.FrameTypeError {
+		t.Fatalf("bridgeA got frame type %v, want Error", f.Type)
+	}
+	if string(f.Payload) != "session_replaced" {
+		t.Errorf("bridgeA error payload = %q, want session_replaced", string(f.Payload))
+	}
+
+	// Subsequent Recv should fail (conn closed by gateway).
+	_, err = bridgeA.Recv(deadline)
+	if err == nil {
+		t.Errorf("bridgeA conn should be closed after session_replaced; Recv returned no error")
+	}
+}
+
+// TestAuditEmitsConnCloseOnDaemonDisconnect verifies the audit log is
+// a complete connect/disconnect ledger: every auth_ok must be paired
+// with a conn_close on the same name. Without this, downstream
+// consumers (operators, dashboards) can't tell when a device went
+// offline without polling.
+func TestAuditEmitsConnCloseOnDaemonDisconnect(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	auditPath := filepath.Join(t.TempDir(), "a.jsonl")
+	w, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer w.Close()
+	cfg := newTestConfig(t)
+	inst, err := Run(ctx, srvCfg, cfg, w)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
+	daemonConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	sendHello(t, ctx, daemonConn, handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1"})
+	if ack, err := daemonConn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon hello ack: %v %v", err, ack.Type)
+	}
+	// Drop the daemon conn — the server-side handleDaemon read loop
+	// returns and the deferred conn_close should fire.
+	daemonConn.Close()
+	// Defer runs asynchronously on the server side; give it a moment.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if auditContains(t, auditPath, "conn_close", "lab01") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !auditContains(t, auditPath, "auth_ok", "lab01") {
+		t.Errorf("audit missing auth_ok for lab01")
+	}
+	if !auditContains(t, auditPath, "conn_close", "lab01") {
+		t.Errorf("audit missing conn_close for lab01 after disconnect")
+	}
+}
+
+// auditContains scans the audit JSONL file for a line whose event
+// field matches `ev` and whose name field matches `name`. Returns
+// false on any read/parse error — the test fails through the
+// assert site, not here.
+func auditContains(t *testing.T, path, ev, name string) bool {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["event"] == ev && rec["name"] == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBridgePingRoutesToDaemon(t *testing.T) {

@@ -33,7 +33,7 @@ var osEnviron = os.Environ
 // envAllowlist lists environment variable names whose current-process value
 // is forwarded to the subprocess; everything else is dropped.
 func Exec(ctx context.Context, req execproto.ExecRequest, allowedCwds, envAllowlist []string, onChunk OnChunk) (execproto.ExecComplete, error) {
-	if !sandbox.PathAllowed(req.Cwd, allowedCwds) {
+	if _, ok := sandbox.PathAllowedResolved(req.Cwd, allowedCwds); !ok {
 		return execproto.ExecComplete{}, ErrCwdForbidden
 	}
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond

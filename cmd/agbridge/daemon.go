@@ -15,11 +15,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/bgproto"
+	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/dialer"
 	"github.com/pw0rld/agbridge/internal/e2e"
+	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
@@ -32,7 +37,10 @@ import (
 	"path/filepath"
 )
 
-const maxFileBytes = 10 << 20
+// maxFileBytes caps tools.ReadFile output daemon-side. var (not const)
+// so smoke tests can raise it for bridge-cap testing. Do not mutate at
+// runtime in production.
+var maxFileBytes int64 = 10 << 20
 
 func newDaemonCmd() *cobra.Command {
 	var cfgPath, stateDir string
@@ -210,6 +218,7 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		e2e:     deps,
 		writes:  make(map[string]*writeSlot),
 		streams: make(map[string]*streamSlot),
+		bgReg:   tools.NewBgRegistry(),
 	}
 	for {
 		f, err := conn.Recv(sessionCtx)
@@ -252,12 +261,21 @@ type daemonState struct {
 	mu      sync.Mutex
 	writes  map[string]*writeSlot
 	streams map[string]*streamSlot
+	bgReg   *tools.BgRegistry
 
 	// Active E2E session. v0.1.0 single-active-session per daemon conn
 	// (v0.0.8 will demux per-bridge by session_id when multi-bridge lands).
 	sessionMu sync.Mutex
 	session   *e2e.Session
 	sessionID [8]byte
+
+	// sendMu serializes Encrypt + WSS Send so nonce consumption matches
+	// wire order. noise.CipherState.Encrypt is not concurrent-safe, and
+	// even if it were, encrypting outside the WSS write lock would let
+	// goroutines reorder ciphertexts on the wire — the receiver's
+	// monotone recv counter would desync permanently. See F4 root cause
+	// and internal/e2e/session_concurrent_test.go.
+	sendMu sync.Mutex
 }
 
 func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
@@ -271,6 +289,26 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 	case proto.FrameTypeFileWriteRequest:
 		slot := s.beginWrite(inner.ReqID)
 		go s.handleWrite(ctx, inner, slot)
+	case proto.FrameTypeFileEditRequest:
+		go s.handleEdit(ctx, inner)
+	case proto.FrameTypeListDirRequest:
+		go s.handleListDir(ctx, inner)
+	case proto.FrameTypeStatRequest:
+		go s.handleStat(ctx, inner)
+	case proto.FrameTypeUploadRequest:
+		// chunks source needs the writeSlot pre-registered so chunks
+		// that arrive concurrently can be delivered. URL source ignores
+		// it but harmless to allocate.
+		slot := s.beginWrite(inner.ReqID)
+		go s.handleUpload(ctx, inner, slot)
+	case proto.FrameTypeDownloadRequest:
+		go s.handleDownload(ctx, inner)
+	case proto.FrameTypeBgExecRequest:
+		go s.handleBgExec(ctx, inner)
+	case proto.FrameTypeSearchRequest:
+		go s.handleSearch(ctx, inner)
+	case proto.FrameTypeCapabilitiesRequest:
+		go s.handleCapabilities(ctx, inner)
 	case proto.FrameTypeFileChunk:
 		s.deliverFileChunk(ctx, inner)
 	case proto.FrameTypeStreamOpen:
@@ -292,6 +330,12 @@ func (s *daemonState) sendInner(ctx context.Context, inner proto.Frame) {
 	if err != nil {
 		return
 	}
+
+	// Encrypt + WSS Send must be a single critical section so nonce
+	// consumption matches wire order. See sendMu comment on daemonState.
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
 	s.sessionMu.Lock()
 	sess := s.session
 	sid := s.sessionID
@@ -424,14 +468,160 @@ func (s *daemonState) handleExec(ctx context.Context, inner proto.Frame) {
 	complete, runErr := tools.Exec(ctx, req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist, onChunk)
 	if runErr != nil {
 		code := "exec_failed"
+		detail := ""
 		if runErr == tools.ErrCwdForbidden {
 			code = "path_forbidden"
+			detail = "cwd not in allowed_exec_cwds; allowed: " + sandbox.FormatAllowlist(s.cfg.AllowedExecCwds)
 		}
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: inner.ReqID, Payload: []byte(code)})
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: inner.ReqID, Payload: errcode.EncodeFramePayload(code, detail)})
 		return
 	}
 	completePayload, _ := complete.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeExecComplete, ReqID: inner.ReqID, Payload: completePayload})
+}
+
+// handleCapabilities answers a FrameTypeCapabilitiesRequest with the
+// daemon's current sandbox + meta. Lets an AI agent introspect what
+// it's allowed to do instead of discovering by trial-and-error.
+func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame) {
+	hostname, _ := os.Hostname()
+	caps := capabilities.Capabilities{
+		DaemonName:        s.cfg.DaemonName,
+		DaemonHostname:    hostname,
+		AllowedExecCwds:   append([]string(nil), s.cfg.AllowedExecCwds...),
+		AllowedReadPaths:  append([]string(nil), s.cfg.AllowedReadPaths...),
+		AllowedWritePaths: append([]string(nil), s.cfg.AllowedWritePaths...),
+		EnvAllowlist:      append([]string(nil), s.cfg.EnvAllowlist...),
+		ForbiddenPorts:    append([]int(nil), s.cfg.ForbiddenPorts...),
+		MaxFileBytes:      maxFileBytes,
+		AgbridgeVersion:   agbridgeVersion,
+	}
+	payload, _ := caps.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleListDir(ctx context.Context, inner proto.Frame) {
+	req, err := fsproto.DecodeListDirRequest(inner.Payload)
+	if err != nil {
+		payload, _ := fsproto.ListDirResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.ListDirectory(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleStat(ctx context.Context, inner proto.Frame) {
+	req, err := fsproto.DecodeStatRequest(inner.Payload)
+	if err != nil {
+		payload, _ := fsproto.StatResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.Stat(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleUpload(ctx context.Context, inner proto.Frame, slot *writeSlot) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.writes, inner.ReqID)
+		s.mu.Unlock()
+	}()
+	req, err := fileproto.DecodeUploadRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	var complete fileproto.FileComplete
+	switch req.Source {
+	case "chunks":
+		next := func() (fileproto.FileChunk, error) {
+			select {
+			case c := <-slot.inbound:
+				return c, nil
+			case <-ctx.Done():
+				return fileproto.FileChunk{}, ctx.Err()
+			}
+		}
+		complete, _ = tools.UploadChunks(ctx, req, s.cfg.AllowedWritePaths, next)
+	case "url":
+		complete, _ = tools.UploadURL(ctx, req, s.cfg.AllowedWritePaths)
+	default:
+		complete = fileproto.FileComplete{
+			Err:       "bad_payload",
+			ErrDetail: "source must be 'chunks' or 'url', got " + req.Source,
+		}
+	}
+	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
+	req, err := fileproto.DecodeDownloadRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can
+	// flow. AllowedReadPaths is the gate, same as read_file.
+	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit}
+	onChunk := func(c fileproto.FileChunk) {
+		payload, _ := c.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
+	}
+	complete, _ := tools.ReadFile(ctx, rdReq, s.cfg.AllowedReadPaths, tools.UploadMaxBytes, onChunk)
+	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+func (s *daemonState) handleSearch(ctx context.Context, inner proto.Frame) {
+	req, err := searchproto.DecodeSearchRequest(inner.Payload)
+	if err != nil {
+		payload, _ := searchproto.SearchResponse{Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	resp := tools.Search(req, s.cfg.AllowedReadPaths)
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleBgExec(ctx context.Context, inner proto.Frame) {
+	req, err := bgproto.DecodeBgExecRequest(inner.Payload)
+	if err != nil {
+		payload, _ := bgproto.BgExecResponse{Action: "unknown", Err: "bad_payload"}.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeBgExecResponse, ReqID: inner.ReqID, Payload: payload})
+		return
+	}
+	var resp bgproto.BgExecResponse
+	switch req.Action {
+	case "start":
+		resp = s.bgReg.StartBg(req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist)
+	case "status":
+		resp = s.bgReg.Status(req)
+	case "logs":
+		resp = s.bgReg.Logs(req)
+	case "kill":
+		resp = s.bgReg.Kill(req)
+	case "list":
+		resp = s.bgReg.List()
+	default:
+		resp = bgproto.BgExecResponse{Action: req.Action, Err: "bad_payload",
+			ErrDetail: "action must be start|status|logs|kill|list"}
+	}
+	payload, _ := resp.Encode()
+	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeBgExecResponse, ReqID: inner.ReqID, Payload: payload})
+}
+
+func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
+	req, err := fileproto.DecodeFileEditRequest(inner.Payload)
+	if err != nil {
+		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
+		return
+	}
+	complete, _ := tools.EditFile(ctx, req, s.cfg.AllowedWritePaths, maxFileBytes)
+	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
 func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {

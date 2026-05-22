@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/pw0rld/agbridge/internal/audit"
 	"github.com/pw0rld/agbridge/internal/auth"
@@ -18,6 +19,12 @@ import (
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
+
+// sessionReplacedTimeout caps how long the gateway will wait to push the
+// session_replaced error frame down the old bridge's conn before yanking
+// it. Kept short so a slow or already-half-dead peer doesn't delay the new
+// bridge's setup.
+const sessionReplacedTimeout = time.Second
 
 // connIO is the subset of *wss.Conn used by handlers; declared here so
 // tests can substitute stubs.
@@ -125,6 +132,12 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
+	// Pair the auth_ok with a conn_close on the way out so the audit log is
+	// a complete connect/disconnect ledger — operators consuming the log
+	// can detect when a daemon goes offline without polling.
+	defer func() {
+		_ = aud.Append(map[string]any{"event": "conn_close", "role": "daemon", "name": h.Name})
+	}()
 	// Read loop owned by handleDaemon (not by any individual bridge): each
 	// frame is routed to the currently-subscribed bridge writer or dropped
 	// if no bridge is connected. When the conn dies (revocation, network),
@@ -150,12 +163,38 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		_ = aud.Append(map[string]any{"event": "authz_failed", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 		return
 	}
-	_, release := inst.Sessions.Register(&Session{
+	// "last writer wins" semantics for bridges: a second bridge with the
+	// same identity replaces the first. The old bridge's daemon→bridge
+	// writer has been rebound to the new conn, so any pending tool call
+	// on the old bridge would hang forever waiting for a response that
+	// now lands elsewhere. We need to sever the old conn — but a naive
+	// Close would make the old bridge's supervisor auto-reconnect and
+	// kick the new one out, looping forever. Instead, send a
+	// session_replaced error frame first so the old bridge's router can
+	// recognise the eviction and exit instead of reconnecting (see
+	// runReader + superviseBridgeConn in cmd/agbridge/bridge.go).
+	replaced, _, release := inst.Sessions.ReplaceByRoleName(&Session{
 		Role: "bridge", Name: h.Name, KeyHash: entry.APIKeyHash, Conn: c,
 	})
 	defer release()
+	if replaced != nil {
+		sendCtx, sendCancel := context.WithTimeout(ctx, sessionReplacedTimeout)
+		_ = replaced.Send(sendCtx, errFrame("session_replaced"))
+		sendCancel()
+		_ = replaced.Close()
+		_ = aud.Append(map[string]any{
+			"event": "bridge_replaced", "name": h.Name,
+			"reason": "newer bridge with same identity connected",
+		})
+	}
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+	// Pair the auth_ok with a conn_close on the way out so the audit log
+	// is a complete connect/disconnect ledger (see handleDaemon for the
+	// daemon-side equivalent).
+	defer func() {
+		_ = aud.Append(map[string]any{"event": "conn_close", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
+	}()
 
 	apiKey := []byte(h.Secret)
 

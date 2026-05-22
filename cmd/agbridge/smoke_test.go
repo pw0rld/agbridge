@@ -131,6 +131,8 @@ func setupPhase4(t *testing.T, dcfg *config.DaemonConfig) *phase4Env {
 	srv.RegisterTool(mcp.ToolSpec{Name: "read_file", InputSchema: map[string]any{"type": "object"}}, rt.readFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "write_file", InputSchema: map[string]any{"type": "object"}}, rt.writeFileHandler)
 	srv.RegisterTool(mcp.ToolSpec{Name: "port_forward", InputSchema: map[string]any{"type": "object"}}, rt.portForwardHandler)
+	srv.RegisterTool(mcp.ToolSpec{Name: "download", InputSchema: map[string]any{"type": "object"}}, rt.downloadHandler)
+	srv.RegisterTool(mcp.ToolSpec{Name: "upload", InputSchema: map[string]any{"type": "object"}}, rt.uploadHandler)
 
 	return &phase4Env{ctx: ctx, srv: srv, rt: rt, gatewayURL: u, cliCfg: cliCfg}
 }
@@ -171,6 +173,84 @@ func callTool(t *testing.T, env *phase4Env, name string, args map[string]any) ma
 	return res
 }
 
+// progressEvent captures one notifications/progress payload as parsed
+// from the MCP stdout stream. message and hasTotal are present so
+// tests can assert the F6 design's "progress=bytes, no total, no
+// message" semantics.
+type progressEvent struct {
+	progress float64
+	hasTotal bool
+	total    float64
+	message  string
+}
+
+// callToolWithProgress drives one tools/call with `_meta.progressToken`
+// set, parses any notifications/progress events that arrive before
+// the final result, and returns both. Fails the test on transport /
+// unmarshal errors.
+func callToolWithProgress(t *testing.T, env *phase4Env, name string, args map[string]any, token string) (map[string]any, []progressEvent) {
+	t.Helper()
+	argsJSON, _ := json.Marshal(args)
+	in := strings.NewReader(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":%q,"arguments":%s,"_meta":{"progressToken":%q}}}`+"\n",
+		name, string(argsJSON), token,
+	))
+	var out bytes.Buffer
+	doneCh := make(chan struct{})
+	go func() {
+		_ = env.srv.Serve(env.ctx, in, &out)
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("server did not return in time; output so far: %s", out.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines (initialize result + tools/call result), got %d: %v", len(lines), lines)
+	}
+
+	var events []progressEvent
+	var result map[string]any
+	for _, line := range lines {
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		if method, ok := msg["method"].(string); ok && method == "notifications/progress" {
+			params, ok := msg["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("notifications/progress has no params map: %v", msg)
+			}
+			ev := progressEvent{}
+			if p, ok := params["progress"].(float64); ok {
+				ev.progress = p
+			}
+			if tot, ok := params["total"].(float64); ok {
+				ev.hasTotal = true
+				ev.total = tot
+			}
+			if m, ok := params["message"].(string); ok {
+				ev.message = m
+			}
+			events = append(events, ev)
+			continue
+		}
+		if res, ok := msg["result"].(map[string]any); ok {
+			// The initialize result also has shape {"result":...}; take
+			// the last one — that's tools/call.
+			result = res
+		}
+	}
+	if result == nil {
+		t.Fatalf("no tools/call result found in output:\n%s", out.String())
+	}
+	return result, events
+}
+
 func TestSmokePhase3ExecEndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
@@ -187,8 +267,8 @@ func TestSmokePhase3ExecEndToEnd(t *testing.T) {
 	if int(meta["exitcode"].(float64)) != 0 {
 		t.Errorf("exitcode: %v", meta["exitcode"])
 	}
-	if s, ok := meta["stdout_b64"].(string); !ok || s == "" {
-		t.Errorf("stdout_b64 missing: %+v", meta)
+	if s, ok := meta["stdout"].(string); !ok || s == "" {
+		t.Errorf("stdout missing: %+v", meta)
 	}
 }
 
@@ -213,13 +293,11 @@ func TestSmokePhase4ReadFile(t *testing.T) {
 	if got := meta["sha256"].(string); got != wantHex {
 		t.Errorf("sha256: got %s want %s", got, wantHex)
 	}
-	gotB64 := meta["content_b64"].(string)
-	gotBytes, err := base64.StdEncoding.DecodeString(gotB64)
-	if err != nil {
-		t.Fatalf("decode content_b64: %v", err)
-	}
-	if !bytes.Equal(gotBytes, content) {
-		t.Errorf("content mismatch: got %q want %q", gotBytes, content)
+	// For UTF-8 content, the text body holds the file directly.
+	// content_b64 is only emitted for non-UTF-8 binary content.
+	gotText := res["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !bytes.Equal([]byte(gotText), content) {
+		t.Errorf("content mismatch: got %q want %q", gotText, content)
 	}
 }
 
@@ -358,10 +436,9 @@ func TestSmokePhase5ReconnectAfterDrop(t *testing.T) {
 	if int(res["_meta"].(map[string]any)["exitcode"].(float64)) != 0 {
 		t.Fatalf("post-reconnect exitcode != 0: %+v", res["_meta"])
 	}
-	stdoutB64 := res["_meta"].(map[string]any)["stdout_b64"].(string)
-	out, _ := base64.StdEncoding.DecodeString(stdoutB64)
-	if !bytes.Contains(out, []byte("after")) {
-		t.Errorf("expected 'after' in stdout, got %q", out)
+	stdout := res["_meta"].(map[string]any)["stdout"].(string)
+	if !strings.Contains(stdout, "after") {
+		t.Errorf("expected 'after' in stdout, got %q", stdout)
 	}
 }
 
@@ -484,6 +561,52 @@ func TestSmokePhase5InflightCallReturnsNetworkLost(t *testing.T) {
 	}
 }
 
+// TestSmokePhase6ReadFileProgress asserts F6: read_file emits one
+// notifications/progress per FileChunk, with monotone byte-count
+// progress, no total, no message. Uses a ~3 MiB file to guarantee
+// multiple 1 MiB chunks.
+func TestSmokePhase6ReadFileProgress(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "big.bin")
+	const size = 3*1024*1024 + 17 // 3 MiB + a tail, ensures >= 4 chunks
+	content := bytes.Repeat([]byte{0x41}, size)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res, events := callToolWithProgress(t, env, "read_file",
+		map[string]any{"path": path}, "tok-read-1")
+
+	if len(events) < 4 {
+		t.Fatalf("expected >= 4 progress events for 3MiB+17 file, got %d", len(events))
+	}
+	// Monotone progress in bytes.
+	var prev float64
+	for i, ev := range events {
+		if ev.progress <= prev && i > 0 {
+			t.Errorf("event %d: progress %v not strictly increasing from %v", i, ev.progress, prev)
+		}
+		if ev.hasTotal {
+			t.Errorf("event %d: total set; F6 spec says omit total", i)
+		}
+		if ev.message != "" {
+			t.Errorf("event %d: message %q; F6 spec says omit message", i, ev.message)
+		}
+		prev = ev.progress
+	}
+	if int(prev) != size {
+		t.Errorf("final progress = %v, want %d (file size)", prev, size)
+	}
+	// And the result itself still arrives correctly.
+	meta := res["_meta"].(map[string]any)
+	if int(meta["size"].(float64)) != size {
+		t.Errorf("result size = %v, want %d", meta["size"], size)
+	}
+}
+
 func readFull(c net.Conn, p []byte) (int, error) {
 	total := 0
 	for total < len(p) {
@@ -494,6 +617,111 @@ func readFull(c net.Conn, p []byte) (int, error) {
 		}
 	}
 	return total, nil
+}
+
+// TestSmokePhase6DownloadProgressDestPath asserts F6 progress
+// emission for the dest_path branch (chunks streamed to disk).
+func TestSmokePhase6DownloadProgressDestPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "src.bin")
+	dst := filepath.Join(tmpDir, "dst.bin")
+	const size = 3 * 1024 * 1024 // exactly 3 MiB -> 3 chunks
+	content := bytes.Repeat([]byte{0x42}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	_, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src, "dest_path": dst}, "tok-dl-1")
+
+	if len(events) < 3 {
+		t.Fatalf("expected >= 3 progress events for 3MiB file, got %d", len(events))
+	}
+	if int(events[len(events)-1].progress) != size {
+		t.Errorf("final progress = %v, want %d", events[len(events)-1].progress, size)
+	}
+}
+
+// TestSmokePhase6DownloadProgressInline asserts F6 progress for the
+// inline (no dest_path) branch.
+func TestSmokePhase6DownloadProgressInline(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "src.bin")
+	const size = 2 * 1024 * 1024 // 2 MiB -> 2 chunks
+	content := bytes.Repeat([]byte{0x43}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	_, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src}, "tok-dl-2")
+
+	if len(events) < 2 {
+		t.Fatalf("expected >= 2 progress events for 2MiB file, got %d", len(events))
+	}
+	if int(events[len(events)-1].progress) != size {
+		t.Errorf("final progress = %v, want %d", events[len(events)-1].progress, size)
+	}
+}
+
+// TestSmokePhase6DownloadInlineCap asserts F6.2 (cap parity with
+// read_file) AND the spec rule that the bridge does not emit a
+// trailing progress event after the cap-trip error. Lowers the
+// bridge cap and raises the daemon cap so the bridge cap trips
+// first.
+//
+// NOTE: mutates package-level vars (maxBufferedOutput, maxFileBytes); must
+// not run in parallel with other tests in this package.
+func TestSmokePhase6DownloadInlineCap(t *testing.T) {
+	origBridgeCap := maxBufferedOutput
+	origDaemonCap := maxFileBytes
+	maxBufferedOutput = 1 << 20 // 1 MiB
+	t.Cleanup(func() {
+		maxBufferedOutput = origBridgeCap
+		maxFileBytes = origDaemonCap
+	})
+	maxFileBytes = 15 << 20 // 15 MiB
+
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "big.bin")
+	const size = 3 * 1024 * 1024 // 3 MiB, larger than the 1 MiB bridge cap
+	content := bytes.Repeat([]byte{0x44}, size)
+	if err := os.WriteFile(src, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res, events := callToolWithProgress(t, env, "download",
+		map[string]any{"src_path": src}, "tok-cap-1")
+
+	// mcpErrorResult shape: {"isError": true, "content": ..., "_meta":
+	// {"error_code": "...", ...}}.
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta, _ := res["_meta"].(map[string]any)
+	if code, _ := meta["error_code"].(string); code != "exceeds_max_size" {
+		t.Errorf("error_code: got %q want %q", code, "exceeds_max_size")
+	}
+
+	// Spec rule: chunk 1 (1 MiB) fits and emits one progress event;
+	// chunk 2 trips the cap and returns BEFORE emitting. So exactly
+	// one progress event should be observed — no trailing progress
+	// for the failed chunk.
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 progress event before cap-trip error, got %d: %+v", len(events), events)
+	}
+	if int(events[0].progress) != 1<<20 {
+		t.Errorf("first progress = %v, want %d (1 MiB chunk)", events[0].progress, 1<<20)
+	}
 }
 
 // runFakeDaemon drives a daemonState dispatch loop on a pre-handshaked wss
@@ -519,5 +747,380 @@ func runFakeDaemon(ctx context.Context, conn *wss.Conn, cfg *config.DaemonConfig
 			continue
 		}
 		state.dispatch(ctx, inner)
+	}
+}
+
+// TestSmokePhase6NoProgressTokenSilent asserts that handlers stay
+// silent when the client omits _meta.progressToken. F6 must not
+// regress backwards compatibility for clients that don't opt in.
+func TestSmokePhase6NoProgressTokenSilent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "small.txt")
+	content := bytes.Repeat([]byte{0x45}, 2*1024*1024) // 2 MiB
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths: []string{tmpDir + "/*", tmpDir},
+	})
+	// callTool (NOT callToolWithProgress) does not pass progressToken.
+	// It expects exactly 2 lines (initialize + result). If any progress
+	// notifications leaked through, callTool would fail the
+	// `len(lines) != 2` check.
+	res := callTool(t, env, "read_file", map[string]any{"path": path})
+	if res == nil {
+		t.Fatal("nil result")
+	}
+}
+
+// TestSmokeF9WriteFileTextContent asserts write_file accepts a raw
+// `content` string and produces a daemon file with the exact bytes.
+func TestSmokeF9WriteFileTextContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "hello.py")
+	content := "from foo import bar\n\nprint('hello, world')\n"
+	wantSha := sha256.Sum256([]byte(content))
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":    path,
+		"content": content,
+	})
+	meta := res["_meta"].(map[string]any)
+	if int64(meta["bytes_written"].(float64)) != int64(len(content)) {
+		t.Errorf("bytes_written: got %v want %d", meta["bytes_written"], len(content))
+	}
+	if got := meta["sha256"].(string); got != hex.EncodeToString(wantSha[:]) {
+		t.Errorf("sha256: got %s want %s", got, hex.EncodeToString(wantSha[:]))
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(onDisk) != content {
+		t.Errorf("on-disk content mismatch: got %q want %q", onDisk, content)
+	}
+}
+
+// TestSmokeF9WriteFileBothContentFieldsRejected asserts that supplying
+// both content and content_b64 returns bad_payload (no silent
+// preference; ambiguous request fails loudly per F9 design).
+func TestSmokeF9WriteFileBothContentFieldsRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":        filepath.Join(tmpDir, "x.txt"),
+		"content":     "raw",
+		"content_b64": base64.StdEncoding.EncodeToString([]byte("raw")),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
+	}
+}
+
+// TestSmokeF9WriteFileNeitherContentFieldRejected asserts that
+// supplying neither content nor content_b64 also returns bad_payload.
+func TestSmokeF9WriteFileNeitherContentFieldRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path": filepath.Join(tmpDir, "x.txt"),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
+	}
+}
+
+// TestSmokeF9WriteFileEmptyContent asserts write_file with an explicit
+// empty `content` string creates a zero-byte file (touch-like). The
+// field is present but empty — that's distinct from "not supplied".
+func TestSmokeF9WriteFileEmptyContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "empty.flag")
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":    path,
+		"content": "",
+	})
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("expected success, got error: %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if int64(meta["bytes_written"].(float64)) != 0 {
+		t.Errorf("bytes_written: got %v want 0", meta["bytes_written"])
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("file size: got %d want 0", st.Size())
+	}
+}
+
+// TestSmokeF9WriteFileEmptyContentB64 mirrors the above for the
+// content_b64 path: an explicit empty string is still a valid
+// zero-byte write.
+func TestSmokeF9WriteFileEmptyContentB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "empty-b64.flag")
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+	res := callTool(t, env, "write_file", map[string]any{
+		"path":        path,
+		"content_b64": "",
+	})
+	if isErr, _ := res["isError"].(bool); isErr {
+		t.Fatalf("expected success, got error: %+v", res)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("file size: got %d want 0", st.Size())
+	}
+}
+
+// TestSmokeF9ExecUTF8NoB64 asserts that when stdout is valid UTF-8,
+// exec emits `stdout` only (no redundant `stdout_b64`). Saves ~33%
+// tokens on the common case.
+func TestSmokeF9ExecUTF8NoB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+	res := callTool(t, env, "exec", map[string]any{
+		"cmd":        "/bin/echo",
+		"args":       []string{"hello, world"},
+		"cwd":        tmpDir,
+		"timeout_ms": 5000,
+	})
+	meta := res["_meta"].(map[string]any)
+	if got := meta["stdout"]; got != "hello, world\n" {
+		t.Errorf("stdout: got %v want %q", got, "hello, world\n")
+	}
+	if _, present := meta["stdout_b64"]; present {
+		t.Errorf("stdout_b64 should be absent when stdout is valid UTF-8")
+	}
+}
+
+// TestSmokeF9ExecBinaryOnlyB64 asserts that when stdout is binary
+// (non-UTF-8), exec emits `stdout_b64` only (no `stdout` text key
+// with garbage). Mirror of the UTF-8 case.
+func TestSmokeF9ExecBinaryOnlyB64(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedExecCwds: []string{tmpDir + "/*", tmpDir},
+		EnvAllowlist:    []string{"PATH"},
+	})
+	// printf with \x escapes emits raw bytes that are not valid UTF-8.
+	res := callTool(t, env, "exec", map[string]any{
+		"cmd":        "/usr/bin/printf",
+		"args":       []string{`\xff\xfe\xfd`},
+		"cwd":        tmpDir,
+		"timeout_ms": 5000,
+	})
+	meta := res["_meta"].(map[string]any)
+	if _, present := meta["stdout"]; present {
+		t.Errorf("stdout should be absent when stdout is binary")
+	}
+	b64, ok := meta["stdout_b64"].(string)
+	if !ok || b64 == "" {
+		t.Errorf("stdout_b64 should be present and non-empty for binary stdout, got %v", meta["stdout_b64"])
+	}
+}
+
+// TestSmokeF9UploadLocalPath asserts that source=local_path reads
+// the bridge-host file and streams it to the daemon, producing a
+// matching sha256 on the daemon side. The AI never embeds the
+// content inline — args contain only two path strings.
+func TestSmokeF9UploadLocalPath(t *testing.T) {
+	bridgeStage := t.TempDir()
+	daemonDest := t.TempDir()
+
+	srcPath := filepath.Join(bridgeStage, "payload.py")
+	content := []byte("from os import getcwd\nprint(getcwd())\n")
+	if err := os.WriteFile(srcPath, content, 0o644); err != nil {
+		t.Fatalf("stage src: %v", err)
+	}
+	wantSha := sha256.Sum256(content)
+	dstPath := filepath.Join(daemonDest, "out.py")
+
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{daemonDest + "/*", daemonDest},
+	})
+	res := callTool(t, env, "upload", map[string]any{
+		"source":     "local_path",
+		"local_path": srcPath,
+		"dest_path":  dstPath,
+	})
+	meta := res["_meta"].(map[string]any)
+	if got := meta["sha256"].(string); got != hex.EncodeToString(wantSha[:]) {
+		t.Errorf("sha256: got %s want %s", got, hex.EncodeToString(wantSha[:]))
+	}
+	onDisk, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("read daemon dst: %v", err)
+	}
+	if !bytes.Equal(onDisk, content) {
+		t.Errorf("daemon content mismatch")
+	}
+}
+
+// TestSmokeF9UploadLocalPathMissingFile asserts that an unreadable
+// local_path returns bad_payload (no half-done upload, daemon
+// untouched).
+func TestSmokeF9UploadLocalPathMissingFile(t *testing.T) {
+	daemonDest := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedWritePaths: []string{daemonDest + "/*", daemonDest},
+	})
+	res := callTool(t, env, "upload", map[string]any{
+		"source":     "local_path",
+		"local_path": "/nonexistent/foo.bin",
+		"dest_path":  filepath.Join(daemonDest, "out.bin"),
+	})
+	if isErr, _ := res["isError"].(bool); !isErr {
+		t.Fatalf("expected isError=true, got %+v", res)
+	}
+	meta := res["_meta"].(map[string]any)
+	if code := meta["error_code"].(string); code != "bad_payload" {
+		t.Errorf("error_code: got %q want bad_payload", code)
+	}
+}
+
+// TestSmokeF9WriteToolBytesComparison is the F9 acceptance test:
+// the same 4 KB realistic Python file is written three ways and the
+// tools/call request size for each is compared.
+//
+// Acceptance constraints:
+//
+//	write_file(content)    ≤  write_file(content_b64) × 0.85
+//	upload(local_path)     ≤  write_file(content_b64) × 0.05
+//
+// Note: for ASCII Go source, JSON-escaped text is ~8% larger than raw
+// while base64 is ~33% larger, giving a natural text/b64 ratio of ~82-84%.
+// The 0.85 ceiling still catches any regression (e.g., re-adding base64
+// to the content path would push the ratio to ~100%).
+// If a future change re-adds base64 to the content path or fattens
+// the local_path args, this test fails loudly.
+func TestSmokeF9WriteToolBytesComparison(t *testing.T) {
+	// Realistic ASCII source — use agbridge's own readfile.go as the
+	// fixture so the benchmark tracks real-world code, not lorem ipsum.
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	fixturePath := filepath.Join(repoRoot, "internal/tools/readfile.go")
+	content, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("fixture %s: %v", fixturePath, err)
+	}
+	if len(content) < 3000 {
+		t.Fatalf("fixture suspiciously small (%d bytes), expected ~4 KB", len(content))
+	}
+
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		AllowedReadPaths:  []string{tmpDir + "/*", tmpDir},
+		AllowedWritePaths: []string{tmpDir + "/*", tmpDir},
+	})
+
+	// Stage local file for the upload path.
+	localStaged := filepath.Join(tmpDir, "staged.go")
+	if err := os.WriteFile(localStaged, content, 0o644); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	type call struct {
+		name string
+		args map[string]any
+	}
+	calls := []call{
+		{
+			name: "write_file",
+			args: map[string]any{
+				"path":        filepath.Join(tmpDir, "out-b64.go"),
+				"content_b64": base64.StdEncoding.EncodeToString(content),
+			},
+		},
+		{
+			name: "write_file",
+			args: map[string]any{
+				"path":    filepath.Join(tmpDir, "out-text.go"),
+				"content": string(content),
+			},
+		},
+		{
+			name: "upload",
+			args: map[string]any{
+				"source":     "local_path",
+				"local_path": localStaged,
+				"dest_path":  filepath.Join(tmpDir, "out-upload.go"),
+			},
+		},
+	}
+
+	// requestBytes builds the exact JSON-RPC tools/call payload that
+	// callTool writes to stdin and returns its byte length. This is the
+	// precise number an AI client would emit.
+	requestBytes := func(name string, args map[string]any) int {
+		argsJSON, _ := json.Marshal(args)
+		line := fmt.Sprintf(
+			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":%q,"arguments":%s}}`,
+			name, string(argsJSON),
+		)
+		return len(line)
+	}
+
+	sizes := make([]int, len(calls))
+	wantSha := sha256.Sum256(content)
+	for i, c := range calls {
+		sizes[i] = requestBytes(c.name, c.args)
+		res := callTool(t, env, c.name, c.args)
+		if isErr, _ := res["isError"].(bool); isErr {
+			t.Fatalf("[%d] %s failed: %+v", i, c.name, res)
+		}
+		meta, _ := res["_meta"].(map[string]any)
+		gotSha, _ := meta["sha256"].(string)
+		if gotSha != hex.EncodeToString(wantSha[:]) {
+			t.Errorf("[%d] %s sha mismatch: got %s want %s", i, c.name, gotSha, hex.EncodeToString(wantSha[:]))
+		}
+	}
+
+	b64Bytes, textBytes, uploadBytes := sizes[0], sizes[1], sizes[2]
+	textRatio := float64(textBytes) / float64(b64Bytes)
+	uploadRatio := float64(uploadBytes) / float64(b64Bytes)
+
+	t.Logf("fixture size: %d bytes", len(content))
+	t.Logf("write_file content_b64 request: %d bytes  (baseline)", b64Bytes)
+	t.Logf("write_file content     request: %d bytes  (%.1f%% saved)", textBytes, (1-textRatio)*100)
+	t.Logf("upload     local_path  request: %d bytes  (%.1f%% saved)", uploadBytes, (1-uploadRatio)*100)
+
+	if textRatio > 0.85 {
+		t.Errorf("F9 thesis violated: write_file(content) is %.0f%% of content_b64 size, want ≤ 85%%", textRatio*100)
+	}
+	if uploadRatio > 0.05 {
+		t.Errorf("F9 thesis violated: upload(local_path) is %.1f%% of content_b64 size, want ≤ 5%%", uploadRatio*100)
 	}
 }

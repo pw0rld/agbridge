@@ -27,17 +27,22 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: 'go.mod'
           cache: true
 
       - name: build binary
         env:
           GOOS: ${{ matrix.target.goos }}
           GOARCH: ${{ matrix.target.goarch }}
+          # CGO_ENABLED=0 makes the binary fully static (no glibc linkage),
+          # so it runs on RHEL 8 / Anolis 3 / Aliyun Linux which ship
+          # glibc 2.32 — github's ubuntu-latest runner is on glibc 2.35+.
+          CGO_ENABLED: "0"
         run: |
           out="agbridge-${GOOS}-${GOARCH}"
           go build -trimpath -ldflags="-s -w" -o "${out}" ./cmd/agbridge
           ls -la "${out}"
+          file "${out}" || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -62,14 +67,18 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: include install.sh
-        run: cp scripts/install.sh dist/install.sh
+      - name: include helper scripts
+        run: |
+          cp scripts/install.sh        dist/install.sh
+          cp scripts/gateway-setup.sh  dist/gateway-setup.sh
 
       - name: compute SHA256SUMS
         working-directory: dist
         run: |
           ls -la
-          sha256sum agbridge-* > SHA256SUMS
+          # Hash all release assets (binaries + helper scripts) so users
+          # can verify integrity for whichever they download.
+          sha256sum agbridge-* install.sh gateway-setup.sh > SHA256SUMS
           cat SHA256SUMS
 
       - name: resolve tag name
@@ -88,6 +97,8 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           files: |
             dist/agbridge-*
+            dist/install.sh
+            dist/gateway-setup.sh
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
