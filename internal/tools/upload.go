@@ -30,7 +30,7 @@ const UploadHTTPTimeout = 5 * time.Minute
 // Same atomic-temp+rename + sha256 semantics as WriteFile but caps at
 // UploadMaxBytes and validates optional ExpectedSha256.
 func UploadChunks(ctx context.Context, req fileproto.UploadRequest, allowedPaths []string, nextChunk ChunkSource) (fileproto.FileComplete, error) {
-	if !sandbox.PathAllowed(req.DestPath, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.DestPath, allowedPaths); !ok {
 		return fileproto.FileComplete{
 			Err:       "path_forbidden",
 			ErrDetail: "dest_path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
@@ -81,7 +81,7 @@ func UploadChunks(ctx context.Context, req fileproto.UploadRequest, allowedPaths
 // UploadURL has the daemon fetch the URL and stream the body to the
 // destination. Bridge does not transfer the bytes. Supports HTTP/HTTPS.
 func UploadURL(ctx context.Context, req fileproto.UploadRequest, allowedPaths []string) (fileproto.FileComplete, error) {
-	if !sandbox.PathAllowed(req.DestPath, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.DestPath, allowedPaths); !ok {
 		return fileproto.FileComplete{
 			Err:       "path_forbidden",
 			ErrDetail: "dest_path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),

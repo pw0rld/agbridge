@@ -62,7 +62,7 @@ func Search(req searchproto.SearchRequest, allowedPaths []string) searchproto.Se
 	if req.Path == "" {
 		return searchproto.SearchResponse{Err: "bad_payload", ErrDetail: "path required"}
 	}
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return searchproto.SearchResponse{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),

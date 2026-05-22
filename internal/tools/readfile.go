@@ -50,7 +50,7 @@ func ReadFile(ctx context.Context, req fileproto.FileReadRequest, allowedPaths [
 			ErrDetail: "limit must be >= 0 (0 means read to EOF)",
 		}, nil
 	}
-	if !sandbox.PathAllowed(req.Path, allowedPaths) {
+	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
 		return fileproto.FileComplete{
 			Err:       "path_forbidden",
 			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
