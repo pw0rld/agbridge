@@ -10,8 +10,8 @@ import (
 
 // These tests pin the daemon's zero-trust invariants. They cover the
 // "gateway can't extend daemon's ACL" property — the load-bearing
-// guarantee behind any SaaS-style deployment where the gateway runs
-// on infrastructure the daemon operator doesn't trust.
+// guarantee for any deployment where the gateway runs on
+// infrastructure the daemon operator doesn't trust.
 //
 // The invariants:
 //
