@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
-	"sync"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
-
-	"github.com/pw0rld/agbridge/internal/proto"
 )
 
 // These tests pin the daemon's zero-trust invariants. They cover the
@@ -92,96 +92,83 @@ func TestPeerAllowedRejectsNearMatchPubkey(t *testing.T) {
 }
 
 // TestDaemonDispatchHasNoConfigMutationCase is a tripwire for
-// invariant I1. It feeds the daemon dispatch a series of frame types
-// and asserts that none of the recognized cases would mutate ACL
-// state. The actual code in dispatch() is a flat switch with no
-// default — unknown types are silently dropped. This test exists to
-// fail loudly if a future PR adds a case like
-// FrameTypeConfigUpdate / FrameTypeAllowlistPush / FrameTypePolicy
-// without also updating this test (and the threat model).
+// invariant I1. It statically scans the dispatch() function in
+// daemon.go and fails if any switch case body contains an assignment
+// to s.e2e.* or s.cfg.* (the cached ACL state). Will fail loudly if a
+// future PR adds a case like FrameTypeConfigUpdate /
+// FrameTypeAllowlistPush / FrameTypePolicy that mutates ACL from a
+// gateway-controlled frame.
 //
-// To keep this test resilient: we don't enumerate FrameType values
-// (the proto package may add legitimately-zero-trust-safe frames
-// over time). Instead, we assert structurally: for every frame type
-// the current code handles, the handler must not touch the cached
-// ACL fields. We do this by snapshotting the e2e.allowedPubs slice
-// header before and after dispatching every known frame type with
-// empty payloads. Any mutation = test fails.
+// We do static analysis (not runtime) because dispatch() spawns
+// goroutines for most handlers; those goroutines outlive the test
+// function and a runtime test cannot reliably observe their effects
+// without elaborate mocking. The static check is both stronger
+// (catches mutation in any case, not just the ones we exercise) and
+// simpler (no mocks).
 func TestDaemonDispatchHasNoConfigMutationCase(t *testing.T) {
-	allowedPubs := [][]byte{[]byte("pinned-pub-bytes-pinned-pub-bytesXX")}
-	// Snapshot a copy so we can detect mutation of the underlying
-	// slice (not just reassignment).
-	snapshot := append([][]byte(nil), allowedPubs...)
-
-	s := &daemonState{
-		e2e: &daemonE2EDeps{
-			mode:        "required",
-			allowedPubs: allowedPubs,
-			prologue:    []byte("test-prologue"),
-		},
-		sessionMu: sync.Mutex{},
-		writes:    map[string]*writeSlot{},
-		streams:   map[string]*streamSlot{},
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "daemon.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse daemon.go: %v", err)
 	}
 
-	// Every frame type the current dispatch() switch handles. If
-	// this list goes stale, the structural test below will still
-	// catch any new handler that mutates ACL — but maintainers should
-	// add new frame types here too for clarity.
-	frameTypes := []proto.FrameType{
-		proto.FrameTypePing,
-		proto.FrameTypeExecRequest,
-		proto.FrameTypeFileReadRequest,
-		proto.FrameTypeFileWriteRequest,
-		proto.FrameTypeFileEditRequest,
-		proto.FrameTypeListDirRequest,
-		proto.FrameTypeStatRequest,
-		proto.FrameTypeUploadRequest,
-		proto.FrameTypeDownloadRequest,
-		proto.FrameTypeBgExecRequest,
-		proto.FrameTypeSearchRequest,
-		proto.FrameTypeCapabilitiesRequest,
-		proto.FrameTypeFileChunk,
-		proto.FrameTypeStreamOpen,
-		proto.FrameTypeStreamData,
-		proto.FrameTypeStreamClose,
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	for _, ft := range frameTypes {
-		// We can't actually call dispatch directly without a
-		// conn — it would panic when handlers try to send replies.
-		// But we *can* assert that the switch case for each type
-		// exists and doesn't touch ACL state. The structural check
-		// is: after every dispatch, allowedPubs is unchanged.
-		//
-		// dispatch() spawns goroutines for most handlers; we don't
-		// wait on them (the test is checking the synchronous control
-		// flow only). The handlers themselves never reach back to
-		// mutate ACL state, which the manual audit confirmed
-		// (see docs/threat-model.md).
-		func() {
-			// Defer recover: handlers may panic without a real conn.
-			// That's fine — we only care that the dispatch site
-			// doesn't synchronously mutate ACL state.
-			defer func() { _ = recover() }()
-			s.dispatch(ctx, proto.Frame{Type: ft, ReqID: "0000000000000000"})
-		}()
-	}
-
-	// Snapshot check: pointer identity of the allowedPubs slice
-	// header AND its contents must be unchanged.
-	if &s.e2e.allowedPubs[0] != &allowedPubs[0] {
-		t.Errorf("allowedPubs slice header changed during dispatch — possible ACL mutation")
-	}
-	if len(s.e2e.allowedPubs) != len(snapshot) {
-		t.Errorf("allowedPubs length changed: got %d, want %d", len(s.e2e.allowedPubs), len(snapshot))
-	}
-	for i := range snapshot {
-		if string(s.e2e.allowedPubs[i]) != string(snapshot[i]) {
-			t.Errorf("allowedPubs[%d] mutated: got %x, want %x", i, s.e2e.allowedPubs[i], snapshot[i])
+	var dispatch *ast.FuncDecl
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
 		}
+		if fn.Name.Name == "dispatch" && fn.Recv != nil {
+			dispatch = fn
+			break
+		}
+	}
+	if dispatch == nil {
+		t.Fatal("could not find dispatch method in daemon.go")
+	}
+
+	// Walk dispatch body. Any assignment whose LHS is a selector
+	// chain rooted at s.e2e or s.cfg is forbidden (would let a
+	// gateway-driven frame rewrite the cached ACL).
+	var violations []string
+	ast.Inspect(dispatch.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			path := selectorChain(lhs)
+			if path == "" {
+				continue
+			}
+			if strings.HasPrefix(path, "s.e2e.") || strings.HasPrefix(path, "s.cfg.") {
+				violations = append(violations, path)
+			}
+		}
+		return true
+	})
+
+	if len(violations) > 0 {
+		t.Errorf("dispatch() contains forbidden ACL-state mutations: %v\n"+
+			"This breaks invariant I1 (daemon owns its ACL). See THREAT-MODEL.md.",
+			violations)
+	}
+}
+
+// selectorChain returns "s.e2e.allowedPubs" for an AST node like
+// SelectorExpr{X:SelectorExpr{X:Ident("s"),Sel:"e2e"},Sel:"allowedPubs"},
+// or "" if the node is not a pure selector chain rooted at an Ident.
+func selectorChain(n ast.Node) string {
+	switch v := n.(type) {
+	case *ast.Ident:
+		return v.Name
+	case *ast.SelectorExpr:
+		left := selectorChain(v.X)
+		if left == "" {
+			return ""
+		}
+		return left + "." + v.Sel.Name
+	default:
+		return ""
 	}
 }
