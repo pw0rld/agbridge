@@ -127,10 +127,10 @@ switch over frame types — none of the cases touches ACL state.
   somehow let `required + empty allowlist` slip through, the peer
   check still refuses every connection.
 
-**What this means for SaaS deployments.** A compromised gateway
-cannot push a "config update" to widen a daemon's ACL. There is no
-protocol path for it. Adding one would require adding a new frame
-type and a new dispatch case — and would trip the test above.
+**What this means in practice.** A compromised gateway cannot push
+a "config update" to widen a daemon's ACL. There is no protocol path
+for it. Adding one would require adding a new frame type and a new
+dispatch case — and would trip the test above.
 
 ### I2. Unknown bridge pubkeys are rejected at handshake
 
@@ -152,8 +152,8 @@ identity. `peerAllowed` (`cmd/agbridge/daemon.go:439`) iterates
 - `TestPeerAllowedEmptyAllowlistOptional` (documents the explicit
   exception for operator-chosen opt-out)
 
-**What this means for SaaS deployments.** Even if the gateway sends
-a NoiseInit frame on behalf of an attacker, the attacker can't
+**What this means in practice.** Even if the gateway sends a
+NoiseInit frame on behalf of an attacker, the attacker can't
 complete the handshake without owning a noise private key whose
 public form is in the daemon's `allowed_bridge_pubkeys`. The
 allowlist is set at boot from local config — see I1.
@@ -247,9 +247,9 @@ Migrated call sites: `bgexec.go:152`, `editfile.go:78`, `exec.go:36`,
   if you're operating in a post-quantum threat model, you need
   something else.
 - **Cross-tenant isolation in the gateway.** This document covers
-  the OSS daemon's local invariants. SaaS deployments add a
-  multi-tenant gateway with its own threat model (covered separately
-  in agbridge-cloud's documentation).
+  the OSS daemon's local invariants. If you wrap the gateway in a
+  multi-tenant frontend, that frontend has its own threat model
+  which is out of scope here.
 
 ---
 
