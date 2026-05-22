@@ -5,14 +5,14 @@
 If you think you've found a security issue in agbridge, please report
 it privately — **do not** open a public GitHub issue.
 
-The fastest channel:
+Channel:
 
 - GitHub Security Advisories — open a private advisory at
   https://github.com/pw0rld/agbridge/security/advisories/new
 
-Alternative:
-
-- Email: `security@agbridge.cloud` <!-- TODO: replace with actual address before launch -->
+This is the only intake channel during v0.0.x. We're a small project
+without a dedicated security mailbox; the advisories form goes
+straight to the maintainers and stays private until disclosure.
 
 Include:
 
