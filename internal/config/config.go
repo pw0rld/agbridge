@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,11 +36,12 @@ type DaemonEntry struct {
 
 // BridgeConfig drives "agbridge bridge".
 type BridgeConfig struct {
-	GatewayURL   string `yaml:"gateway_url"`
-	AgentName    string `yaml:"agent_name"`
-	APIKey       string `yaml:"api_key"`
-	CertPin      string `yaml:"cert_pin"`
-	TargetDaemon string `yaml:"target_daemon"`
+	GatewayURL     string `yaml:"gateway_url"`
+	AgentName      string `yaml:"agent_name"`
+	APIKey         string `yaml:"api_key"`
+	CertPin        string `yaml:"cert_pin"`
+	GatewayTLSMode string `yaml:"gateway_tls_mode"`
+	TargetDaemon   string `yaml:"target_daemon"`
 
 	// E2E (v0.1.0+). Default "disabled" preserves pre-v0.1.0 behavior.
 	E2EMode             string `yaml:"e2e_mode"`               // "disabled" | "optional" | "required"
@@ -53,6 +55,7 @@ type DaemonConfig struct {
 	DaemonName        string   `yaml:"daemon_name"`
 	RegistrationToken string   `yaml:"registration_token"`
 	CertPin           string   `yaml:"cert_pin"`
+	GatewayTLSMode    string   `yaml:"gateway_tls_mode"`
 	AllowedExecCwds   []string `yaml:"allowed_exec_cwds"`
 	EnvAllowlist      []string `yaml:"env_allowlist"`
 	AllowedReadPaths  []string `yaml:"allowed_read_paths"`
@@ -89,6 +92,9 @@ func LoadBridge(path string) (*BridgeConfig, error) {
 	if cfg.GatewayURL == "" || cfg.AgentName == "" || cfg.APIKey == "" || cfg.TargetDaemon == "" {
 		return nil, errors.New("config: gateway_url, agent_name, api_key, target_daemon all required")
 	}
+	if err := normalizeGatewayTLS(&cfg.GatewayTLSMode); err != nil {
+		return nil, err
+	}
 	if err := normalizeBridgeE2E(&cfg); err != nil {
 		return nil, err
 	}
@@ -104,10 +110,25 @@ func LoadDaemon(path string) (*DaemonConfig, error) {
 	if cfg.GatewayURL == "" || cfg.DaemonName == "" || cfg.RegistrationToken == "" {
 		return nil, errors.New("config: gateway_url, daemon_name, registration_token all required")
 	}
+	if err := normalizeGatewayTLS(&cfg.GatewayTLSMode); err != nil {
+		return nil, err
+	}
 	if err := normalizeDaemonE2E(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func normalizeGatewayTLS(mode *string) error {
+	switch strings.ToLower(strings.TrimSpace(*mode)) {
+	case "", "pin":
+		*mode = "pin"
+	case "webpki":
+		*mode = "webpki"
+	default:
+		return fmt.Errorf("config: invalid gateway_tls_mode %q (want pin|webpki)", *mode)
+	}
+	return nil
 }
 
 func normalizeBridgeE2E(cfg *BridgeConfig) error {

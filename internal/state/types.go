@@ -17,10 +17,13 @@ import "time"
 // changes so older binaries refuse to load newer state.
 const CurrentVersion = 1
 
-// GatewayRef is the gateway address + cert pin a device dials.
+// GatewayRef is the gateway address + TLS identity policy a device dials.
 type GatewayRef struct {
 	URL     string `json:"url"`
-	CertPin string `json:"cert_pin"`
+	CertPin string `json:"cert_pin,omitempty"`
+	// TLSMode is "pin" (default/backward-compatible) or "webpki" (hosted
+	// Cloudflare mode: trust system WebPKI instead of origin cert pin).
+	TLSMode string `json:"tls_mode,omitempty"`
 }
 
 // DaemonRef is the pinned identity of one daemon as cached on a bridge.

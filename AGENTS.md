@@ -30,15 +30,18 @@ filesystem and shell.
 
 ### Writing
 
-- `write_file path content_b64 [mode]` — atomic write (temp + rename).
-  **10 MB content cap.** Encode bytes with base64 before sending.
+- `write_file path content [mode]` or `write_file path content_b64
+  [mode]` — atomic write (temp + rename). **10 MB content cap.** Use
+  `content` for UTF-8 text; use `content_b64` only for genuinely
+  binary bytes.
 - `edit_file path old_string new_string` — partial edit. Daemon keeps
   an auto-GC'd backup, so you can iterate safely.
 
 ### Transfer
 
-- `upload` — bridge → daemon. Two source modes: inline bytes or fetch
-  from URL.
+- `upload` — bridge → daemon. Three source modes: `local_path` (bridge
+  reads a local file and streams it), `url` (daemon fetches directly),
+  or `chunks` (inline base64 chunks).
 - `download src_path [dest_path] [offset] [limit]` — daemon → bridge.
   - **With `dest_path`**: streams chunks straight to disk on the
     bridge host, no inline content returned, no size cap. Use this
@@ -51,18 +54,18 @@ filesystem and shell.
 - `exec cmd args [cwd] [env] [timeout_ms]` — single command, blocking,
   10 MB stdout/stderr cap, own process group, SIGKILL on timeout. Don't
   use for long-running servers — use `exec_start` family.
-- `exec_start cmd args …` → returns a handle. Then `exec_status` /
-  `exec_logs` / `exec_kill` / `exec_list` to manage it. Use for `npm
-  run dev`, watchers, tail-followers, anything that doesn't exit on
-  its own.
+- `exec_start cmd args …` → returns a `process_id`. Then
+  `exec_status` / `exec_logs` / `exec_kill` / `exec_list` manage it.
+  Use for `npm run dev`, watchers, tail-followers, anything that
+  doesn't exit on its own.
 
 ### Network forwarding
 
 - `port_forward remote_host remote_port [local_port]` — opens a local
   TCP listener on the bridge host that tunnels to the daemon side.
 - `port_forward_list` / `port_forward_close` — manage active forwards.
-- `forbidden_ports` is enforced at the gateway based on the daemon's
-  enrollment policy.
+- `forbidden_ports` is enforced by the daemon based on its enrollment
+  policy.
 
 ## Key behaviours you should bake in
 
@@ -131,9 +134,9 @@ Things to NOT do:
 ### "Read all the source files in a project"
 
 ```
-list_directory path=/some/project       # see the layout
-search query="TODO" path=/some/project  # find what's interesting
-read_file path=/some/project/foo.go     # pull the ones you need
+list_directory path=/some/project         # see the layout
+search pattern="TODO" path=/some/project  # find what's interesting
+read_file path=/some/project/foo.go       # pull the ones you need
 ```
 
 Don't open every file blindly. Use `search` + `list_directory` to
@@ -165,11 +168,11 @@ Increase `timeout_ms` if the build is slow. Default is short.
 
 ```
 exec_start cmd=npm args=["run","dev"] cwd=/app
-# → returns {handle: "..."}
-exec_logs handle=... offset=0          # initial dump
-# poll with increasing offset for streaming
-exec_status handle=...                  # is it still running?
-exec_kill handle=...                    # stop it
+# → returns {process_id: "..."}
+exec_logs process_id=... since_offset=0  # initial dump
+# poll with next_offset from the prior exec_logs response
+exec_status process_id=...               # is it still running?
+exec_kill process_id=...                 # stop it
 ```
 
 ### "Get a 50 MB binary back to my machine"
