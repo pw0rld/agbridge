@@ -32,24 +32,30 @@ func newDoctorCmd() *cobra.Command {
 				stateDir = defaultStateDir()
 			}
 			path := filepath.Join(stateDir, "state.json")
-			var gwURL, pinned string
+			var gwURL, pinned, tlsMode string
 			if bs, err := state.LoadBridge(path); err == nil {
 				gwURL = bs.Gateway.URL
 				pinned = bs.Gateway.CertPin
+				tlsMode = bs.Gateway.TLSMode
 			} else if ds, err := state.LoadDaemon(path); err == nil {
 				gwURL = ds.Gateway.URL
 				pinned = ds.Gateway.CertPin
+				tlsMode = ds.Gateway.TLSMode
 			} else {
 				return fmt.Errorf("no usable state at %s", path)
 			}
-			return doctorProbe(cmd.Context(), gwURL, pinned, cmd.OutOrStderr())
+			return doctorProbe(cmd.Context(), gwURL, pinned, tlsMode, cmd.OutOrStderr())
 		},
 	}
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "default ~/.config/agbridge/")
 	return cmd
 }
 
-func doctorProbe(ctx context.Context, gwURL, expectedPin string, w io.Writer) error {
+func doctorProbe(ctx context.Context, gwURL, expectedPin, tlsMode string, w io.Writer) error {
+	tlsMode, err := normalizeGatewayTLSMode(tlsMode)
+	if err != nil {
+		return err
+	}
 	u, err := url.Parse(gwURL)
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("invalid gateway URL: %v", err)
@@ -88,17 +94,19 @@ func doctorProbe(ctx context.Context, gwURL, expectedPin string, w io.Writer) er
 	step("tcp_connect", true, "", time.Since(t0))
 
 	t0 = time.Now()
-	tlsConn, err := tls.Dial("tcp", host, &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
-	})
+	tlsCfg, err := enrollTLSConfig(tlsMode)
+	if err != nil {
+		step("tls_handshake", false, err.Error(), time.Since(t0))
+		return err
+	}
+	tlsConn, err := tls.Dial("tcp", host, tlsCfg)
 	if err != nil {
 		step("tls_handshake", false, err.Error(), time.Since(t0))
 		return err
 	}
 	certs := tlsConn.ConnectionState().PeerCertificates
 	_ = tlsConn.Close()
-	step("tls_handshake", true, "TLS 1.3 OK", time.Since(t0))
+	step("tls_handshake", true, fmt.Sprintf("TLS 1.3 OK (%s)", tlsMode), time.Since(t0))
 
 	if len(certs) == 0 {
 		return fmt.Errorf("no peer cert")
@@ -106,16 +114,20 @@ func doctorProbe(ctx context.Context, gwURL, expectedPin string, w io.Writer) er
 	t0 = time.Now()
 	sum := sha256.Sum256(certs[0].Raw)
 	gotPin := "sha256:" + hex.EncodeToString(sum[:])
-	if expectedPin != "" && gotPin != expectedPin {
+	if tlsMode == gatewayTLSModePin && expectedPin != "" && gotPin != expectedPin {
 		step("cert_pin", false, fmt.Sprintf("local=%s pinned=%s", gotPin, expectedPin), time.Since(t0))
 		return fmt.Errorf("cert pin mismatch — possible MITM or legitimate rotation; re-enroll to update")
 	}
-	step("cert_pin", true, gotPin, time.Since(t0))
+	if tlsMode == gatewayTLSModeWebPKI {
+		step("cert_pin", true, fmt.Sprintf("%s (diagnostic only; webpki mode)", gotPin), time.Since(t0))
+	} else {
+		step("cert_pin", true, gotPin, time.Since(t0))
+	}
 
 	t0 = time.Now()
 	httpsURL := "https://" + host + "/v1/enroll"
 	cl := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}},
+		Transport: &http.Transport{TLSClientConfig: tlsCfg.Clone()},
 		Timeout:   5 * time.Second,
 	}
 	resp, err := cl.Post(httpsURL, "application/json", strings.NewReader("{}"))

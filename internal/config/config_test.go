@@ -44,6 +44,7 @@ gateway_url: wss://gw.example:8443/
 agent_name: claude-laptop
 api_key: my-api-key
 cert_pin: sha256:abc
+gateway_tls_mode: webpki
 target_daemon: lab01
 `
 	p := writeTemp(t, yaml)
@@ -53,6 +54,9 @@ target_daemon: lab01
 	}
 	if cfg.GatewayURL != "wss://gw.example:8443/" || cfg.AgentName != "claude-laptop" || cfg.TargetDaemon != "lab01" {
 		t.Errorf("got %+v", cfg)
+	}
+	if cfg.GatewayTLSMode != "webpki" {
+		t.Errorf("gateway_tls_mode: got %q", cfg.GatewayTLSMode)
 	}
 }
 
@@ -70,6 +74,24 @@ cert_pin: sha256:abc
 	}
 	if cfg.DaemonName != "lab01" || cfg.RegistrationToken != "my-token" {
 		t.Errorf("got %+v", cfg)
+	}
+	if cfg.GatewayTLSMode != "pin" {
+		t.Errorf("gateway_tls_mode default: got %q", cfg.GatewayTLSMode)
+	}
+}
+
+func TestLoadBridgeRejectsBadGatewayTLSMode(t *testing.T) {
+	yaml := `
+gateway_url: wss://gw.example:8443/
+agent_name: claude-laptop
+api_key: my-api-key
+gateway_tls_mode: nope
+target_daemon: lab01
+`
+	p := writeTemp(t, yaml)
+	_, err := LoadBridge(p)
+	if err == nil || !strings.Contains(err.Error(), "gateway_tls_mode") {
+		t.Fatalf("expected gateway_tls_mode error, got %v", err)
 	}
 }
 

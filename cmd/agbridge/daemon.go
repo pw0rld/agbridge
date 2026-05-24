@@ -14,7 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/bgproto"
 	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
@@ -24,10 +23,10 @@ import (
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
-	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/sandbox"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/state"
 	"github.com/pw0rld/agbridge/internal/streamproto"
 	"github.com/pw0rld/agbridge/internal/tools"
@@ -55,9 +54,9 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tlsCfg := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}
-			if err := auth.AttachCertPin(tlsCfg, cfg.CertPin); err != nil {
-				return fmt.Errorf("cert pin: %w", err)
+			tlsCfg, err := runtimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
+			if err != nil {
+				return err
 			}
 
 			// Load Noise dependencies once (reused across reconnects).
@@ -125,6 +124,7 @@ func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 		DaemonName:           s.DaemonName,
 		RegistrationToken:    s.APIKey,
 		CertPin:              s.Gateway.CertPin,
+		GatewayTLSMode:       s.Gateway.TLSMode,
 		AllowedExecCwds:      s.AllowedExecCwds,
 		EnvAllowlist:         s.EnvAllowlist,
 		AllowedReadPaths:     s.AllowedReadPaths,

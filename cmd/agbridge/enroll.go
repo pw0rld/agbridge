@@ -31,6 +31,7 @@ func newEnrollCmd() *cobra.Command {
 		gatewayURL    string
 		token         string
 		stateDir      string
+		tlsMode       string
 		emitJSON      bool
 		noRegisterMCP bool
 	)
@@ -44,12 +45,13 @@ func newEnrollCmd() *cobra.Command {
 			if stateDir == "" {
 				stateDir = defaultStateDir()
 			}
-			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, emitJSON, noRegisterMCP, cmd.OutOrStderr(), cmd.OutOrStdout())
+			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, tlsMode, emitJSON, noRegisterMCP, cmd.OutOrStderr(), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "gateway URL (e.g. wss://gw.example.com/)")
 	cmd.Flags().StringVar(&token, "token", "", "enrollment token (et_…)")
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "where to write state.json + keys (default ~/.config/agbridge/)")
+	cmd.Flags().StringVar(&tlsMode, "tls-mode", "pin", "gateway TLS mode: pin (origin cert pin) or webpki (system CA, Cloudflare-compatible)")
 	cmd.Flags().BoolVar(&emitJSON, "json", false, "emit machine-readable JSON result")
 	cmd.Flags().BoolVar(&noRegisterMCP, "no-register-mcp", false, "skip auto-registering agbridge with detected AI clients (bridge role only)")
 	return cmd
@@ -72,7 +74,7 @@ type enrollOutcome struct {
 	Steps     []enrollStep `json:"steps"`
 }
 
-func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, noRegisterMCP bool, stderr, stdout io.Writer) error {
+func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, emitJSON, noRegisterMCP bool, stderr, stdout io.Writer) error {
 	outcome := enrollOutcome{}
 
 	report := func(stage string, ok bool, msg string, dur time.Duration) {
@@ -97,6 +99,11 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 			_ = json.NewEncoder(stdout).Encode(outcome)
 		}
 		return fmt.Errorf("%s: %w", stage, err)
+	}
+
+	tlsMode, err := normalizeGatewayTLSMode(tlsMode)
+	if err != nil {
+		return fail("tls_mode", err)
 	}
 
 	u, err := url.Parse(gwURL)
@@ -129,10 +136,12 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 
 	// Stage 3: TLS handshake + capture peer cert
 	t0 = time.Now()
-	tlsConn, err := tls.Dial("tcp", host, &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
-	})
+	tlsCfg, err := enrollTLSConfig(tlsMode)
+	if err != nil {
+		report("tls_handshake", false, err.Error(), time.Since(t0))
+		return fail("tls_handshake", err)
+	}
+	tlsConn, err := tls.Dial("tcp", host, tlsCfg)
 	if err != nil {
 		report("tls_handshake", false, err.Error(), time.Since(t0))
 		return fail("tls_handshake", err)
@@ -143,21 +152,25 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 		report("tls_handshake", false, "no peer cert", time.Since(t0))
 		return fail("tls_handshake", fmt.Errorf("no peer cert"))
 	}
-	report("tls_handshake", true, "TLS 1.3 OK", time.Since(t0))
+	report("tls_handshake", true, fmt.Sprintf("TLS 1.3 OK (%s)", tlsMode), time.Since(t0))
 
 	// Stage 4: cert pin (computed locally; the gateway returns its
 	// authoritative pin in the enroll response — we compare in stage 7.)
 	t0 = time.Now()
 	pinBytes := sha256.Sum256(certs[0].Raw)
 	pin := "sha256:" + hex.EncodeToString(pinBytes[:])
-	report("cert_pin", true, pin, time.Since(t0))
+	if tlsMode == gatewayTLSModeWebPKI {
+		report("cert_pin", true, fmt.Sprintf("%s (diagnostic only; webpki mode)", pin), time.Since(t0))
+	} else {
+		report("cert_pin", true, pin, time.Since(t0))
+	}
 
 	// Stage 5: HTTP reachability — POST empty body, expect 400 (handler
 	// is wired) rather than 404 (handler missing).
 	t0 = time.Now()
 	httpsURL := "https://" + host + "/v1/enroll"
 	cl := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}},
+		Transport: &http.Transport{TLSClientConfig: tlsCfg.Clone()},
 		Timeout:   5 * time.Second,
 	}
 	probeResp, err := cl.Post(httpsURL, "application/json", bytes.NewReader([]byte("{}")))
@@ -205,7 +218,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 	// Cross-check the gateway-supplied pin against what we saw on the
 	// wire. They MUST match — otherwise we are talking to two different
 	// TLS terminators (MITM).
-	if enrollResp.CertPin != pin {
+	if tlsMode == gatewayTLSModePin && enrollResp.CertPin != pin {
 		report("token_exchange", false, fmt.Sprintf("pin mismatch: local=%s remote=%s", pin, enrollResp.CertPin), time.Since(t0))
 		return fail("token_exchange", fmt.Errorf("cert pin mismatch"))
 	}
@@ -235,7 +248,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 			DeviceID:            enrollResp.DeviceID,
 			AgentName:           enrollResp.Name,
 			APIKey:              enrollResp.APIKey,
-			Gateway:             state.GatewayRef{URL: gwURL, CertPin: enrollResp.CertPin},
+			Gateway:             state.GatewayRef{URL: gwURL, CertPin: certPinForState(tlsMode, enrollResp.CertPin), TLSMode: tlsModeForState(tlsMode)},
 			BridgeStaticKeyPath: keyPath,
 			E2EMode:             enrollResp.E2EMode,
 			DefaultTarget:       enrollResp.TargetDaemon,
@@ -258,7 +271,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 			DeviceID:             enrollResp.DeviceID,
 			DaemonName:           enrollResp.Name,
 			APIKey:               enrollResp.APIKey,
-			Gateway:              state.GatewayRef{URL: gwURL, CertPin: enrollResp.CertPin},
+			Gateway:              state.GatewayRef{URL: gwURL, CertPin: certPinForState(tlsMode, enrollResp.CertPin), TLSMode: tlsModeForState(tlsMode)},
 			NoiseStaticKeyPath:   keyPath,
 			E2EMode:              enrollResp.E2EMode,
 			AllowedExecCwds:      enrollResp.AllowedExecCwds,
@@ -289,6 +302,20 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir string, emitJSON, 
 		autoSetupBridge(stderr, enrollResp.Name, enrollResp.TargetDaemon, stateDir, noRegisterMCP)
 	}
 	return nil
+}
+
+func certPinForState(tlsMode, pin string) string {
+	if tlsMode == gatewayTLSModeWebPKI {
+		return ""
+	}
+	return pin
+}
+
+func tlsModeForState(tlsMode string) string {
+	if tlsMode == gatewayTLSModePin {
+		return ""
+	}
+	return tlsMode
 }
 
 // errMCPAlreadyRegistered is the sentinel returned by client-specific
