@@ -1,6 +1,9 @@
 package state
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Validate checks BridgeState fields for self-consistency.
 func (s *BridgeState) Validate() error {
@@ -12,6 +15,9 @@ func (s *BridgeState) Validate() error {
 	}
 	if s.Gateway.URL == "" {
 		return fmt.Errorf("state: gateway.url is required")
+	}
+	if err := validateGatewayTLSMode(s.Gateway.TLSMode); err != nil {
+		return err
 	}
 	if err := validateE2EMode(s.E2EMode); err != nil {
 		return err
@@ -33,6 +39,9 @@ func (s *DaemonState) Validate() error {
 	if s.Gateway.URL == "" {
 		return fmt.Errorf("state: gateway.url is required")
 	}
+	if err := validateGatewayTLSMode(s.Gateway.TLSMode); err != nil {
+		return err
+	}
 	if err := validateE2EMode(s.E2EMode); err != nil {
 		return err
 	}
@@ -43,6 +52,15 @@ func (s *DaemonState) Validate() error {
 		return fmt.Errorf("state: allowed_bridge_pubkeys must be non-empty when e2e_mode=required")
 	}
 	return nil
+}
+
+func validateGatewayTLSMode(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "pin", "webpki":
+		return nil
+	default:
+		return fmt.Errorf("state: invalid gateway.tls_mode %q (want pin|webpki)", mode)
+	}
 }
 
 // Validate checks GatewayState fields.

@@ -1,95 +1,162 @@
 # agbridge quickstart
 
-A 5-minute walkthrough to wire agbridge into your AI assistant of choice
-(Codex CLI, Claude Code, Cline, Continue, or any other MCP host).
+This walkthrough connects an AI assistant to a remote machine through
+agbridge:
 
-agbridge is **stdio-MCP on the client side, WSS on the wire**. Your AI
-client spawns a small `agbridge bridge` process locally; that bridge
-forwards tool calls over a TLS+Noise tunnel to a daemon on your dev
-machine.
+```
+AI client -> agbridge bridge -> gateway -> agbridge daemon -> remote machine
+```
 
-## 0. Pre-flight
+The bridge is a local stdio MCP server. The daemon runs on the machine
+where files, commands, and private services live. Both bridge and daemon
+dial the gateway outbound over TLS WebSocket.
+
+## 0. Before You Start
 
 You need:
 
-- A reachable gateway (own host or hosted) — see [README](README.md)
-  for setup if you don't have one.
-- The `agbridge` binary on the dev machine (where files live) **and** on
-  the agent host (where the AI client runs). Same binary; same release.
+- A gateway host reachable by both machines, usually on TCP 443.
+- The `agbridge` binary installed on the gateway host, daemon host, and
+  AI client host.
+- A hostname for the gateway, for example `gw.example.com`.
+
+Install:
 
 ```bash
-# install (Linux/macOS, x86_64/arm64)
 curl -sSL https://github.com/pw0rld/agbridge/raw/main/scripts/install.sh | bash
 agbridge --help
 ```
 
-## 1. Enroll a daemon (on the dev machine)
+In the examples below:
 
-On the **gateway host**, mint a one-shot enrollment token:
+- Gateway config lives under `/etc/agbridge`.
+- The daemon is named `lab01`.
+- The bridge is named `peter-laptop`.
+- The daemon is allowed to operate under `/home/me/projects`.
+
+Commands that write under `/etc` or bind port 443 must run with the
+appropriate service permissions. Use `sudo`, a reverse proxy, or a
+non-privileged test port to match your environment.
+
+## 1. Start the Gateway
+
+On the gateway host:
+
+```bash
+sudo mkdir -p /etc/agbridge /var/log/agbridge
+
+agbridge cert gen \
+  --cn gw.example.com \
+  --out /etc/agbridge
+```
+
+Create `/etc/agbridge/gateway.yaml`:
+
+```yaml
+listen: 0.0.0.0:443
+public_url: wss://gw.example.com/
+audit_path: /var/log/agbridge/audit.jsonl
+agents: []
+daemons: []
+```
+
+Start the gateway:
+
+```bash
+agbridge gateway \
+  --config /etc/agbridge/gateway.yaml \
+  --cert /etc/agbridge/cert.pem \
+  --key /etc/agbridge/key.pem
+```
+
+Keep this process running with systemd, tmux, or your supervisor of
+choice.
+
+## 2. Enroll the Daemon
+
+On the gateway host, issue a one-shot token for the daemon:
 
 ```bash
 agbridge issue-token \
+  --config /etc/agbridge/gateway.yaml \
   --role daemon \
-  --name my-laptop \
-  --allowed-paths "$HOME/code" \
-  --allowed-paths "$HOME/code/*" \
+  --name lab01 \
+  --allowed-paths /home/me/projects \
   --ttl 30 \
   --json
 ```
 
-The output prints a `token` field and a ready-to-paste `paste_command`.
-
-On the **dev machine**, run that paste command (or equivalent):
+The JSON output includes `token`, `gateway`, `expires_at`, and
+`paste_command`. Run the paste command on the daemon host, or run the
+equivalent command manually:
 
 ```bash
 agbridge enroll \
   --gateway wss://gw.example.com/ \
-  --token et_XXXXXXXXXXXXXXXXXX
+  --token et_XXXXXXXXXXXXXXXXXX \
+  --state-dir ~/.config/agbridge
 ```
 
-The daemon's state — device id, api key, Noise key — is written under
-`~/.config/agbridge/`. Start it:
+Enrollment runs connectivity diagnostics, generates the daemon Noise key
+locally, exchanges the token for an API key and policy, then writes:
 
-```bash
-agbridge daemon
-# → "daemon: handshake ok, awaiting Route frames"
+```text
+~/.config/agbridge/state.json
+~/.config/agbridge/daemon_noise.key
 ```
 
-Keep it running. Use tmux, systemd, or your supervisor of choice.
-
-## 2. Enroll a bridge (on the agent host)
-
-Same idea, different role:
+Start the daemon:
 
 ```bash
-# on the gateway host
+agbridge daemon --state-dir ~/.config/agbridge
+```
+
+Expected log:
+
+```text
+daemon: handshake ok, awaiting Route frames
+```
+
+## 3. Enroll the Bridge
+
+On the gateway host, issue a bridge token targeting the daemon:
+
+```bash
 agbridge issue-token \
+  --config /etc/agbridge/gateway.yaml \
   --role bridge \
-  --name my-laptop-agent \
-  --target my-laptop \
+  --name peter-laptop \
+  --target lab01 \
   --ttl 30 \
   --json
 ```
 
+On the AI client host, run the printed paste command, or enroll manually:
+
 ```bash
-# on the agent host
 agbridge enroll \
   --gateway wss://gw.example.com/ \
-  --token et_YYYYYYYYYYYYYYYYYY
+  --token et_YYYYYYYYYYYYYYYYYY \
+  --state-dir ~/.config/agbridge
 ```
 
-State lands in `~/.config/agbridge/`. **Do not start the bridge by
-hand** — your MCP client will spawn it on demand.
+Bridge enrollment writes:
 
-## 3. Wire the bridge into your MCP client
+```text
+~/.config/agbridge/state.json
+~/.config/agbridge/bridge_noise.key
+```
 
-The bridge is a stdio MCP server. Every client needs the same three
-things:
+Do not start `agbridge bridge` by hand for normal use. Your MCP client
+will spawn it.
+
+## 4. Register the MCP Server
+
+The bridge is a stdio MCP server. Every MCP client needs:
 
 - Command: `agbridge`
-- Args: `bridge` (optionally `--state-dir <path>` if you used a custom
-  location)
-- Env: none required
+- Args: `bridge --state-dir <state-dir>`
+- Env: none
 
 ### Codex CLI
 
@@ -98,7 +165,7 @@ Append to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.agbridge]
 command = "agbridge"
-args = ["bridge"]
+args = ["bridge", "--state-dir", "/home/peter/.config/agbridge"]
 ```
 
 Restart Codex.
@@ -106,89 +173,147 @@ Restart Codex.
 ### Claude Code
 
 ```bash
-claude mcp add agbridge agbridge -- bridge
+claude mcp add agbridge agbridge -- bridge --state-dir /home/peter/.config/agbridge
 ```
 
-Restart Claude Code (or `/clear` for a fresh session).
+Restart Claude Code or start a fresh session.
 
-### Cline / Continue / generic JSON-config clients
+### Cline, Continue, and Generic JSON Clients
 
 ```json
 {
   "mcpServers": {
     "agbridge": {
       "command": "agbridge",
-      "args": ["bridge"]
+      "args": ["bridge", "--state-dir", "/home/peter/.config/agbridge"]
     }
   }
 }
 ```
 
-Restart the client.
+Restart the client so it reloads the MCP tool list.
 
-## 4. Confirm and try it
+## 5. Try It
 
-After the client restarts, ask it to list tools — you should see
-`exec`, `read_file`, `write_file`, `edit_file`, `download`, `upload`,
-`list_directory`, `stat`, `port_forward`, `search`, and a handful of
-`exec_*` background-process tools.
+Ask the AI client to list MCP tools. You should see tools like:
 
-Try:
-
+```text
+capabilities
+exec
+exec_start / exec_status / exec_logs / exec_kill / exec_list
+read_file / write_file / edit_file
+search
+list_directory / stat
+upload / download
+port_forward / port_forward_list / port_forward_close
 ```
-read the README at <a path inside your daemon's allow-list>
-list everything in <some directory on the dev machine>
-download <a binary file> to /tmp/<filename> on this machine
+
+Useful first prompts:
+
+```text
+Use agbridge.capabilities and tell me what remote paths you can access.
 ```
 
-## Tool quick-reference
+```text
+Use agbridge.list_directory on /home/me/projects.
+```
+
+```text
+Use agbridge.search for "TODO" under /home/me/projects.
+```
+
+```text
+Use agbridge.exec to run "go test ./..." in /home/me/projects/myrepo.
+```
+
+## Tool Reference
 
 | Tool | Use it for | Notes |
 |---|---|---|
-| `exec` | Run a command remotely | 10 MB stdout/stderr cap; own pgroup; SIGKILL on timeout |
-| `read_file` | Read text/binary | 10 MB inline cap; `offset`/`limit` for partial reads; progress events |
-| `write_file` | Atomic write via temp + rename | 10 MB content cap |
-| `edit_file` | `old_string` → `new_string` partial edit | Auto-GC'd backups |
-| `download` | Stream a file back to the agent host | With `dest_path`: streams to local disk, no inline cap. Without: 10 MB inline cap, returns content |
-| `upload` | Send a file to the daemon machine | Inline bytes or URL fetch |
-| `list_directory` / `stat` | Filesystem inspection | — |
-| `port_forward` / `_list` / `_close` | Local-port → remote TCP | Blocks `forbidden_ports` set at enrollment |
-| `search` | Pure-Go content search | Replaces `exec grep` |
-| `exec_start` / `_status` / `_logs` / `_kill` / `_list` | Background processes | Long-running servers, watchers, etc. |
+| `capabilities` | Inspect daemon policy | Best first call in a new session |
+| `exec` | Run one command | Non-interactive; default timeout is 5 minutes |
+| `exec_start` / `_status` / `_logs` / `_kill` / `_list` | Manage background processes | For dev servers, watchers, and long-running jobs |
+| `read_file` | Read remote text or binary | Inline cap 10 MiB; supports `offset` and `limit` |
+| `write_file` | Write small files | Use `content` for text, `content_b64` for binary |
+| `edit_file` | Replace text in place | Atomic rewrite, backup retained |
+| `search` | Search file contents | Structured results; skips common cache/build dirs |
+| `list_directory` / `stat` | Inspect filesystem | Avoids shell quoting and output parsing |
+| `upload` | Send files to daemon | `local_path`, `url`, or inline `chunks`; cap 1 GiB |
+| `download` | Bring files back to bridge host | Use `dest_path` for files over 10 MiB |
+| `port_forward` / `_list` / `_close` | Forward local TCP to daemon side | Remote port denylist is enforced by daemon policy |
 
-### Progress notifications
+## Progress Notifications
 
-`read_file`, `download`, and `exec` emit MCP `notifications/progress`
-events when the client supplies `_meta.progressToken` in the request.
-Clients that don't send a token see byte-identical pre-progress
-behaviour. No throttling — events fire per chunk (1 MiB for file
-streams).
+`exec`, `read_file`, and `download` emit MCP
+`notifications/progress` events when the client supplies
+`_meta.progressToken`.
+
+File progress reports bytes received so far. Exec progress reports
+streamed output chunks. Clients that do not send a progress token get
+the same final results without progress events.
 
 ## Troubleshooting
 
-**Daemon never prints "handshake ok"**
-Auth failure. Check the gateway audit log for `auth_failed` events.
-If the gateway state has a stale device record (e.g. you re-enrolled
-without revoking), `gateway-revoke --name <device>` on the gateway host,
-then SIGHUP the gateway and re-issue the token.
+### `agbridge daemon` says `either --state-dir or --config is required`
 
-**Client says "tool not found"**
-Restart the client. MCP tool lists are fetched once at startup.
+Pass the state directory explicitly:
 
-**`exceeds_max_size` on `read_file` or inline `download`**
-File over 10 MB. Use `read_file` with `offset`/`limit` for partial
-reads, or `download` with `dest_path` to stream the whole thing to
-local disk.
+```bash
+agbridge daemon --state-dir ~/.config/agbridge
+```
 
-**Where state lives**
-- Daemon: `~/.config/agbridge/state.json` + `daemon_noise.key`
-- Bridge: `~/.config/agbridge/state.json` + `bridge_noise.key`
-- Gateway state (source of truth): `<gateway-root>/etc/gateway-state.json`
+### Client says `tool not found`
 
-## Going further
+Restart the AI client. Most MCP clients read the tool list only at
+startup.
 
-- [README](README.md) — architecture overview, security model, full
-  command reference
-- [ROADMAP](ROADMAP.md) — what shipped, what's next
-- `agbridge --help`, `agbridge <command> --help` — every flag is
-  documented inline
+### Daemon never reaches `handshake ok`
+
+Check:
+
+- The daemon can reach the gateway hostname and port.
+- The gateway process is running.
+- The token was issued against the same gateway state.
+- The gateway audit log contains `auth_failed`, `daemon_offline`, or
+  other route/auth events.
+
+If you re-enrolled a device with the same name, revoke the stale record
+and re-issue a token:
+
+```bash
+agbridge gateway-revoke --config /etc/agbridge/gateway.yaml --name lab01
+```
+
+Then send SIGHUP to the running gateway process.
+
+### `path_forbidden`
+
+The daemon policy does not allow that path. Use `capabilities` to inspect
+allowed paths, or issue a new daemon token with a narrower or wider
+policy and re-enroll the daemon.
+
+### `exceeds_max_size`
+
+Inline results are capped:
+
+- `read_file`: 10 MiB
+- `write_file`: 10 MiB
+- inline `download`: 10 MiB
+- `exec` stdout and stderr: 10 MiB each on the bridge side
+
+For large reads, use `read_file` with `offset` and `limit`, or
+`download` with `dest_path`.
+
+### State Locations
+
+| Role | Files |
+|---|---|
+| daemon | `~/.config/agbridge/state.json`, `daemon_noise.key` |
+| bridge | `~/.config/agbridge/state.json`, `bridge_noise.key` |
+| gateway | `gateway.yaml`, `gateway-state.json`, `tokens.json`, audit JSONL |
+
+## Going Further
+
+- [README](README.md): architecture, security model, and CLI reference.
+- [ROADMAP](ROADMAP.md): shipped work and known next items.
+- `agbridge --help`: command and flag reference.
