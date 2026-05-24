@@ -31,10 +31,10 @@ import (
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
-	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/mcp"
 	"github.com/pw0rld/agbridge/internal/proto"
+	"github.com/pw0rld/agbridge/internal/searchproto"
 	"github.com/pw0rld/agbridge/internal/state"
 	"github.com/pw0rld/agbridge/internal/streamproto"
 	"github.com/pw0rld/agbridge/internal/transport"
@@ -60,9 +60,9 @@ func newBridgeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tlsCfg := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}
-			if err := auth.AttachCertPin(tlsCfg, cfg.CertPin); err != nil {
-				return fmt.Errorf("cert pin: %w", err)
+			tlsCfg, err := runtimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
+			if err != nil {
+				return err
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -105,7 +105,7 @@ func newBridgeCmd() *cobra.Command {
 
 			srv := mcp.NewServer()
 			srv.RegisterTool(mcp.ToolSpec{
-				Name:        "exec",
+				Name: "exec",
 				Description: "Run a command on the remote daemon machine and return stdout/stderr/exitcode. " +
 					"stdout/stderr are emitted as plain text (`stdout`, `stderr` in _meta) when valid " +
 					"UTF-8; as base64 (`stdout_b64`, `stderr_b64`) otherwise — never both.",
@@ -384,6 +384,7 @@ func bridgeConfigFromState(s *state.BridgeState) *config.BridgeConfig {
 		AgentName:           s.AgentName,
 		APIKey:              s.APIKey,
 		CertPin:             s.Gateway.CertPin,
+		GatewayTLSMode:      s.Gateway.TLSMode,
 		TargetDaemon:        s.DefaultTarget,
 		E2EMode:             s.E2EMode,
 		BridgeStaticKeyPath: s.BridgeStaticKeyPath,
@@ -443,10 +444,10 @@ func (r *router) wasEvicted() bool { return r.evicted.Load() }
 // the lifecycle tools (port_forward_list / port_forward_close) can
 // inspect and tear it down without restarting the bridge.
 type activeForward struct {
-	LocalPort  int       `json:"local_port"`
-	RemoteHost string    `json:"remote_host"`
-	RemotePort int       `json:"remote_port"`
-	OpenedAt   int64     `json:"opened_at"` // unix seconds
+	LocalPort  int    `json:"local_port"`
+	RemoteHost string `json:"remote_host"`
+	RemotePort int    `json:"remote_port"`
+	OpenedAt   int64  `json:"opened_at"` // unix seconds
 	ln         net.Listener
 }
 

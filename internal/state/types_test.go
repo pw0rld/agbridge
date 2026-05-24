@@ -12,7 +12,7 @@ func TestBridgeStateRoundTrip(t *testing.T) {
 		DeviceID:            "d_test_bridge",
 		AgentName:           "test-laptop",
 		APIKey:              "ak_test",
-		Gateway:             GatewayRef{URL: "wss://gw.test/", CertPin: "sha256:abc"},
+		Gateway:             GatewayRef{URL: "wss://gw.test/", CertPin: "sha256:abc", TLSMode: "webpki"},
 		BridgeStaticKeyPath: "bridge.key",
 		E2EMode:             "required",
 		DefaultTarget:       "lab01",
@@ -39,6 +39,9 @@ func TestBridgeStateRoundTrip(t *testing.T) {
 	}
 	if out.KnownDaemons["lab01"].Pubkey != "AGv0Lr8m..." {
 		t.Fatal("daemon pubkey lost in roundtrip")
+	}
+	if out.Gateway.TLSMode != "webpki" {
+		t.Fatalf("tls_mode lost in roundtrip: %q", out.Gateway.TLSMode)
 	}
 }
 

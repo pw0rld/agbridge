@@ -14,6 +14,7 @@ func TestBridgeStateValidate(t *testing.T) {
 		{"valid", func(*BridgeState) {}, ""},
 		{"missing_api_key", func(s *BridgeState) { s.APIKey = "" }, "api_key"},
 		{"missing_gateway_url", func(s *BridgeState) { s.Gateway.URL = "" }, "gateway.url"},
+		{"bad_gateway_tls_mode", func(s *BridgeState) { s.Gateway.TLSMode = "off" }, "tls_mode"},
 		{"bad_e2e_mode", func(s *BridgeState) { s.E2EMode = "yolo" }, "e2e_mode"},
 		{"e2e_required_no_key", func(s *BridgeState) {
 			s.E2EMode = "required"
@@ -52,6 +53,7 @@ func TestDaemonStateValidate(t *testing.T) {
 	}{
 		{"valid", func(*DaemonState) {}, ""},
 		{"missing_name", func(s *DaemonState) { s.DaemonName = "" }, "daemon_name"},
+		{"bad_gateway_tls_mode", func(s *DaemonState) { s.Gateway.TLSMode = "off" }, "tls_mode"},
 		{"bad_e2e", func(s *DaemonState) { s.E2EMode = "xyz" }, "e2e_mode"},
 	}
 	for _, tt := range tests {
