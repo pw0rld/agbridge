@@ -8,10 +8,20 @@ import (
 )
 
 func main() {
-	root := &cobra.Command{
-		Use:   "agbridge",
-		Short: "AI agent remote operation surface over restrictive networks",
+	root := newRootCmd()
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+}
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:     "agbridge",
+		Short:   "AI agent remote operation surface over restrictive networks",
+		Version: agbridgeVersion,
+	}
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		newBridgeCmd(), newGatewayCmd(), newDaemonCmd(),
 		newCertCmd(), newKeygenCmd(),
@@ -19,8 +29,5 @@ func main() {
 		newConfigCmd(), newLogoutCmd(), newDoctorCmd(),
 		newGatewayListDevicesCmd(), newGatewayRevokeCmd(),
 	)
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return root
 }
