@@ -31,6 +31,7 @@ func newRootCmd() *cobra.Command {
 		newGatewayListDevicesCmd(), newGatewayRevokeCmd(),
 		// CLI subcommands (v0.0.2)
 		newTargetsCmd(),
+		newAIHelpCmd(),
 	)
 	return root
 }
