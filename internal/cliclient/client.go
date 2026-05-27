@@ -77,18 +77,30 @@ func Invoke(ctx context.Context, opts Options, fn func(ctx context.Context, c *C
 
 // Client wraps a live, handshook bridge connection. Exposes the
 // existing tool handlers (exec, read_file, write_file, etc) bound to
-// this connection.
+// this connection via the embedded Router.
 type Client struct {
 	conn      *wss.Conn
 	opts      Options
+	router    *Router
+	cancel    context.CancelFunc
 	session   *e2e.Session // nil when E2EMode == "disabled"
 	sessionID [8]byte
 }
 
-// Close tears down the WSS connection.
+// Router returns the live router for callers (CLI subcommands) that
+// need to invoke handler methods directly.
+func (c *Client) Router() *Router { return c.router }
+
+// Close tears down the runReader goroutine + WSS connection. Idempotent.
 func (c *Client) Close() error {
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
 	if c.conn != nil {
-		return c.conn.Close()
+		err := c.conn.Close()
+		c.conn = nil
+		return err
 	}
 	return nil
 }
@@ -138,6 +150,37 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 			return nil, fmt.Errorf("noise ik: %w", err)
 		}
 	}
+
+	// Build the Router AFTER Hello and Noise IK complete. runReader
+	// reads off conn.Recv and would race the synchronous Noise frames
+	// if started any earlier — handshakeE2E.Send/Recv would lose their
+	// reply to runReader's loop.
+	bcfg := &config.BridgeConfig{
+		GatewayURL:          opts.GatewayURL,
+		AgentName:           opts.AgentName,
+		APIKey:              opts.APIKey,
+		GatewayTLSMode:      opts.GatewayTLSMode,
+		CertPin:             opts.CertPin,
+		TargetDaemon:        opts.Target,
+		DaemonPubkey:        opts.DaemonPubkey,
+		E2EMode:             opts.E2EMode,
+		BridgeStaticKeyPath: opts.BridgeStaticKeyPath,
+	}
+	readerCtx, cancel := context.WithCancel(ctx)
+	rt, err := NewRouter(readerCtx, conn, []byte(opts.APIKey), bcfg)
+	if err != nil {
+		cancel()
+		_ = conn.Close()
+		return nil, fmt.Errorf("router: %w", err)
+	}
+	c.router = rt
+	c.cancel = cancel
+	// Install the negotiated E2E session on the router so sendInner
+	// encrypts subsequent Route frames with the right keys + sid.
+	if c.session != nil {
+		rt.installSession(c.session, c.sessionID)
+	}
+	go rt.runReader()
 	return c, nil
 }
 
