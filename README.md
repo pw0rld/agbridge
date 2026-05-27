@@ -340,6 +340,77 @@ Current development branch: `phase-c`.
 | seccomp/cgroup sandboxing | Deferred |
 | Windows daemon support | Deferred |
 
+## What's Next: v0.0.2 CLI-first
+
+v0.0.1 exposes the tool surface through an MCP stdio server that
+Claude Code / Codex / Cursor launch as a long-running subprocess.
+v0.0.2 reorganises the bridge around a one-shot CLI:
+
+```
+   ┌────────────────────────────────────────────────────────────┐
+   │  Local machine (where your AI runs)                        │
+   │                                                            │
+   │    AI agent (any tool with shell access)                   │
+   │        ↓ spawns subprocess                                 │
+   │    agbridge ls /etc                                        │
+   │    agbridge cat /var/log/app.log                           │
+   │    agbridge exec -- npm test                               │
+   │    agbridge edit /etc/nginx.conf "listen 80" "listen 8080" │
+   │        ↓                                                   │
+   │    one-shot Go process: dial → handshake → tool → exit    │
+   └────────────────────────────┬───────────────────────────────┘
+                                │ wss + TLS (Noise IK on inner frames)
+                                ▼
+                     ┌───────────────────────┐
+                     │  gateway (unchanged)  │
+                     │  daemon  (unchanged)  │
+                     └───────────────────────┘
+```
+
+Each AI invocation spawns a fresh `agbridge <subcommand>` that dials the
+gateway, runs one tool, and exits. Gateway and daemon binaries do not
+change — existing v0.0.1 daemons keep working with v0.0.2 bridges.
+
+**Why**
+
+- Zero-restart onboarding: paste an install command, tools are usable
+  immediately. No "restart your AI client" step.
+- Any AI with shell access can drive agbridge, not just MCP-aware
+  clients.
+- Same UX on Linux, macOS, Windows, containers, CI runners.
+
+**Changes**
+
+- `agbridge bridge` (MCP stdio) and the `internal/mcp` package are
+  removed.
+- `agbridge enroll` no longer writes Claude Code / Codex / Cursor MCP
+  configs.
+- Stateful tools (`port_forward`, `background_exec`, `kill_process`) are
+  temporarily removed; they need a long-lived process and return in
+  v0.0.3+ via an optional daemon mode.
+- A first-class CLI command surface is added: `ls`, `cat`, `stat`,
+  `grep`, `write`, `edit`, `exec`, `put`, `get`, `caps`, plus
+  `status` / `targets` / `config use` for target selection.
+
+**Output contracts**
+
+- Default stdout is human-readable; `--json` switches every command to a
+  stable structured shape.
+- Errors are always single-line JSON on stderr:
+  `{"code":"not_found","message":"...","retry_safe":false}`.
+- Exit code is `0` on success, `1` on any error.
+
+**Per-call latency** (spike-measured cross-machine LAN): ~5 ms median,
+~12 ms p90. WAN extrapolation lands in the 150–300 ms range depending on
+RTT and whether E2E is enabled. Within typical AI session pacing (3–10 s
+of reasoning between calls) this is not perceptible.
+
+**Compatibility**
+
+v0.0.1 binaries remain downloadable. Existing v0.0.1 installs keep
+working until you upgrade. v0.0.2 requires re-running `agbridge enroll`
+and adopting the CLI on the AI side.
+
 ## Known Limitations
 
 - One daemon currently has one active bridge writer at a time. A newer
