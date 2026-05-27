@@ -22,6 +22,7 @@ func newRootCmd() *cobra.Command {
 		Version: agbridgeVersion,
 	}
 	root.SetVersionTemplate("{{.Version}}\n")
+	registerGlobalFlags(root)
 	root.AddCommand(
 		newBridgeCmd(), newGatewayCmd(), newDaemonCmd(),
 		newCertCmd(), newKeygenCmd(),
