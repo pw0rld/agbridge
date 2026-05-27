@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
@@ -85,24 +86,29 @@ type Client struct {
 	cancel    context.CancelFunc
 	session   *e2e.Session // nil when E2EMode == "disabled"
 	sessionID [8]byte
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Router returns the live router for callers (CLI subcommands) that
 // need to invoke handler methods directly.
 func (c *Client) Router() *Router { return c.router }
 
-// Close tears down the runReader goroutine + WSS connection. Idempotent.
+// Close tears down the runReader goroutine + WSS connection. Safe to
+// call concurrently from signal handlers and deferred cleanup paths;
+// only the first call performs the teardown.
 func (c *Client) Close() error {
-	if c.cancel != nil {
-		c.cancel()
-		c.cancel = nil
-	}
-	if c.conn != nil {
-		err := c.conn.Close()
-		c.conn = nil
-		return err
-	}
-	return nil
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+			c.cancel = nil
+		}
+		if c.conn != nil {
+			c.closeErr = c.conn.Close()
+			c.conn = nil
+		}
+	})
+	return c.closeErr
 }
 
 // dial implements the v0.0.2 connect flow:
