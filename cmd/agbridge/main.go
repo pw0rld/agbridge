@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 		newGrepCmd(),
 		newWriteCmd(),
 		newEditCmd(),
+		newExecCmd(),
 	)
 	return root
 }
