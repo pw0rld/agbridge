@@ -32,6 +32,7 @@ func newRootCmd() *cobra.Command {
 		// CLI subcommands (v0.0.2)
 		newTargetsCmd(),
 		newAIHelpCmd(),
+		newStatusCmd(),
 	)
 	return root
 }
