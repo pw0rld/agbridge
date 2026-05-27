@@ -38,6 +38,7 @@ func newRootCmd() *cobra.Command {
 		newCatCmd(),
 		newStatCmd(),
 		newGrepCmd(),
+		newWriteCmd(),
 	)
 	return root
 }
