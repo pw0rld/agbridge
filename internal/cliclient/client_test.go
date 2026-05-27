@@ -6,6 +6,14 @@ import (
 	"github.com/pw0rld/agbridge/internal/config"
 )
 
+// TestInvokeSignature is filled in later (Task 2.0 extracts shared
+// fixture). For now it just ensures the Invoke signature exists.
+func TestInvokeSignature(t *testing.T) {
+	_ = Invoke
+	_ = (*Client).Close
+	_ = Handler(nil)
+}
+
 func TestNewOptionsFromBridgeConfig(t *testing.T) {
 	cfg := &config.BridgeConfig{
 		GatewayURL:   "wss://gw.example/",
