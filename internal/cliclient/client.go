@@ -8,10 +8,14 @@ package cliclient
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/handshake"
+	"github.com/pw0rld/agbridge/internal/proto"
+	"github.com/pw0rld/agbridge/internal/transport"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
 
@@ -91,5 +95,44 @@ func (c *Client) Close() error {
 //
 // Returns a Client ready for one handler call.
 func dial(ctx context.Context, opts Options) (*Client, error) {
-	return nil, fmt.Errorf("not implemented yet — see Task 1.3")
+	tlsCfg, err := buildTLSConfig(opts.GatewayTLSMode, opts.CertPin)
+	if err != nil {
+		return nil, fmt.Errorf("tls config: %w", err)
+	}
+	conn, err := wss.Dial(ctx, opts.GatewayURL, transport.Credentials{}, tlsCfg)
+	if err != nil {
+		return nil, fmt.Errorf("wss dial: %w", err)
+	}
+	helloBytes, err := handshake.Hello{
+		Role:         "bridge",
+		Name:         opts.AgentName,
+		Secret:       opts.APIKey,
+		TargetDaemon: opts.Target,
+	}.Encode()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("encode hello: %w", err)
+	}
+	if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloBytes}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("send hello: %w", err)
+	}
+	ack, err := conn.Recv(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("recv hello ack: %w", err)
+	}
+	if ack.Type != proto.FrameTypeHelloAck {
+		_ = conn.Close()
+		return nil, fmt.Errorf("unexpected ack type: %v", ack.Type)
+	}
+	c := &Client{conn: conn, opts: opts}
+	// Noise IK is added in Task 1.5 — leave a hook here.
+	return c, nil
+}
+
+// buildTLSConfig is moved from cmd/agbridge/tlsmode.go in Task 1.4.
+// Stub here until then.
+func buildTLSConfig(mode, certPin string) (*tls.Config, error) {
+	return nil, fmt.Errorf("buildTLSConfig moves here in Task 1.4")
 }
