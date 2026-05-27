@@ -1,4 +1,4 @@
-package main
+package auth
 
 import "testing"
 
@@ -8,32 +8,32 @@ func TestNormalizeGatewayTLSMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"", gatewayTLSModePin, false},
-		{"pin", gatewayTLSModePin, false},
-		{" PIN ", gatewayTLSModePin, false},
-		{"webpki", gatewayTLSModeWebPKI, false},
-		{"WebPKI", gatewayTLSModeWebPKI, false},
+		{"", GatewayTLSModePin, false},
+		{"pin", GatewayTLSModePin, false},
+		{" PIN ", GatewayTLSModePin, false},
+		{"webpki", GatewayTLSModeWebPKI, false},
+		{"WebPKI", GatewayTLSModeWebPKI, false},
 		{"off", "", true},
 	}
 	for _, tt := range tests {
-		got, err := normalizeGatewayTLSMode(tt.in)
+		got, err := NormalizeGatewayTLSMode(tt.in)
 		if tt.wantErr {
 			if err == nil {
-				t.Fatalf("normalizeGatewayTLSMode(%q): expected error", tt.in)
+				t.Fatalf("NormalizeGatewayTLSMode(%q): expected error", tt.in)
 			}
 			continue
 		}
 		if err != nil {
-			t.Fatalf("normalizeGatewayTLSMode(%q): %v", tt.in, err)
+			t.Fatalf("NormalizeGatewayTLSMode(%q): %v", tt.in, err)
 		}
 		if got != tt.want {
-			t.Fatalf("normalizeGatewayTLSMode(%q): got %q want %q", tt.in, got, tt.want)
+			t.Fatalf("NormalizeGatewayTLSMode(%q): got %q want %q", tt.in, got, tt.want)
 		}
 	}
 }
 
 func TestEnrollTLSConfigModes(t *testing.T) {
-	pinCfg, err := enrollTLSConfig(gatewayTLSModePin)
+	pinCfg, err := EnrollTLSConfig(GatewayTLSModePin)
 	if err != nil {
 		t.Fatalf("pin config: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestEnrollTLSConfigModes(t *testing.T) {
 		t.Fatal("pin enrollment should skip WebPKI so self-signed origins can be pinned")
 	}
 
-	webpkiCfg, err := enrollTLSConfig(gatewayTLSModeWebPKI)
+	webpkiCfg, err := EnrollTLSConfig(GatewayTLSModeWebPKI)
 	if err != nil {
 		t.Fatalf("webpki config: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestEnrollTLSConfigModes(t *testing.T) {
 }
 
 func TestRuntimeTLSConfigModes(t *testing.T) {
-	pinCfg, err := runtimeTLSConfig(gatewayTLSModePin, "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	pinCfg, err := RuntimeTLSConfig(GatewayTLSModePin, "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatalf("pin config: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestRuntimeTLSConfigModes(t *testing.T) {
 		t.Fatal("pin runtime config should use VerifyConnection pin check")
 	}
 
-	webpkiCfg, err := runtimeTLSConfig(gatewayTLSModeWebPKI, "")
+	webpkiCfg, err := RuntimeTLSConfig(GatewayTLSModeWebPKI, "")
 	if err != nil {
 		t.Fatalf("webpki config: %v", err)
 	}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/gateway"
 	"github.com/pw0rld/agbridge/internal/state"
@@ -101,7 +102,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 		return fmt.Errorf("%s: %w", stage, err)
 	}
 
-	tlsMode, err := normalizeGatewayTLSMode(tlsMode)
+	tlsMode, err := auth.NormalizeGatewayTLSMode(tlsMode)
 	if err != nil {
 		return fail("tls_mode", err)
 	}
@@ -136,7 +137,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 
 	// Stage 3: TLS handshake + capture peer cert
 	t0 = time.Now()
-	tlsCfg, err := enrollTLSConfig(tlsMode)
+	tlsCfg, err := auth.EnrollTLSConfig(tlsMode)
 	if err != nil {
 		report("tls_handshake", false, err.Error(), time.Since(t0))
 		return fail("tls_handshake", err)
@@ -159,7 +160,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 	t0 = time.Now()
 	pinBytes := sha256.Sum256(certs[0].Raw)
 	pin := "sha256:" + hex.EncodeToString(pinBytes[:])
-	if tlsMode == gatewayTLSModeWebPKI {
+	if tlsMode == auth.GatewayTLSModeWebPKI {
 		report("cert_pin", true, fmt.Sprintf("%s (diagnostic only; webpki mode)", pin), time.Since(t0))
 	} else {
 		report("cert_pin", true, pin, time.Since(t0))
@@ -218,7 +219,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 	// Cross-check the gateway-supplied pin against what we saw on the
 	// wire. They MUST match — otherwise we are talking to two different
 	// TLS terminators (MITM).
-	if tlsMode == gatewayTLSModePin && enrollResp.CertPin != pin {
+	if tlsMode == auth.GatewayTLSModePin && enrollResp.CertPin != pin {
 		report("token_exchange", false, fmt.Sprintf("pin mismatch: local=%s remote=%s", pin, enrollResp.CertPin), time.Since(t0))
 		return fail("token_exchange", fmt.Errorf("cert pin mismatch"))
 	}
@@ -305,14 +306,14 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 }
 
 func certPinForState(tlsMode, pin string) string {
-	if tlsMode == gatewayTLSModeWebPKI {
+	if tlsMode == auth.GatewayTLSModeWebPKI {
 		return ""
 	}
 	return pin
 }
 
 func tlsModeForState(tlsMode string) string {
-	if tlsMode == gatewayTLSModePin {
+	if tlsMode == auth.GatewayTLSModePin {
 		return ""
 	}
 	return tlsMode

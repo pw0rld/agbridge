@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/state"
 )
 
@@ -52,7 +53,7 @@ func newDoctorCmd() *cobra.Command {
 }
 
 func doctorProbe(ctx context.Context, gwURL, expectedPin, tlsMode string, w io.Writer) error {
-	tlsMode, err := normalizeGatewayTLSMode(tlsMode)
+	tlsMode, err := auth.NormalizeGatewayTLSMode(tlsMode)
 	if err != nil {
 		return err
 	}
@@ -94,7 +95,7 @@ func doctorProbe(ctx context.Context, gwURL, expectedPin, tlsMode string, w io.W
 	step("tcp_connect", true, "", time.Since(t0))
 
 	t0 = time.Now()
-	tlsCfg, err := enrollTLSConfig(tlsMode)
+	tlsCfg, err := auth.EnrollTLSConfig(tlsMode)
 	if err != nil {
 		step("tls_handshake", false, err.Error(), time.Since(t0))
 		return err
@@ -114,11 +115,11 @@ func doctorProbe(ctx context.Context, gwURL, expectedPin, tlsMode string, w io.W
 	t0 = time.Now()
 	sum := sha256.Sum256(certs[0].Raw)
 	gotPin := "sha256:" + hex.EncodeToString(sum[:])
-	if tlsMode == gatewayTLSModePin && expectedPin != "" && gotPin != expectedPin {
+	if tlsMode == auth.GatewayTLSModePin && expectedPin != "" && gotPin != expectedPin {
 		step("cert_pin", false, fmt.Sprintf("local=%s pinned=%s", gotPin, expectedPin), time.Since(t0))
 		return fmt.Errorf("cert pin mismatch — possible MITM or legitimate rotation; re-enroll to update")
 	}
-	if tlsMode == gatewayTLSModeWebPKI {
+	if tlsMode == auth.GatewayTLSModeWebPKI {
 		step("cert_pin", true, fmt.Sprintf("%s (diagnostic only; webpki mode)", gotPin), time.Since(t0))
 	} else {
 		step("cert_pin", true, gotPin, time.Since(t0))
