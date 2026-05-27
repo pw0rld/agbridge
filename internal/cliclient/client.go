@@ -9,6 +9,7 @@ package cliclient
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,11 @@ type Options struct {
 	// at the Noise IK call site via e2e.PubFromBase64.
 	DaemonPubkey string
 	Target       string
+	// TLSConfig optionally overrides the TLS config used to dial the
+	// gateway. When nil (production default), dial builds the config
+	// from GatewayTLSMode + CertPin via auth.RuntimeTLSConfig.
+	// Primarily for tests; advanced users can also inject custom mTLS.
+	TLSConfig *tls.Config
 }
 
 // OptionsFromBridgeConfig translates an existing v0.0.1 BridgeConfig
@@ -118,9 +124,15 @@ func (c *Client) Close() error {
 //
 // Returns a Client ready for one handler call.
 func dial(ctx context.Context, opts Options) (*Client, error) {
-	tlsCfg, err := auth.RuntimeTLSConfig(opts.GatewayTLSMode, opts.CertPin)
-	if err != nil {
-		return nil, fmt.Errorf("tls config: %w", err)
+	var tlsCfg *tls.Config
+	if opts.TLSConfig != nil {
+		tlsCfg = opts.TLSConfig
+	} else {
+		var err error
+		tlsCfg, err = auth.RuntimeTLSConfig(opts.GatewayTLSMode, opts.CertPin)
+		if err != nil {
+			return nil, fmt.Errorf("tls config: %w", err)
+		}
 	}
 	conn, err := wss.Dial(ctx, opts.GatewayURL, transport.Credentials{}, tlsCfg)
 	if err != nil {
