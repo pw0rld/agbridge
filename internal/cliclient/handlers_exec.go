@@ -10,7 +10,7 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/execproto"
-	"github.com/pw0rld/agbridge/internal/mcp"
+	
 	"github.com/pw0rld/agbridge/internal/proto"
 )
 
@@ -29,7 +29,7 @@ func (r *Router) ExecHandler(ctx context.Context, raw json.RawMessage) (any, err
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 	}
-	emit := mcp.EmitterFromContext(ctx)
+	emit := EmitterFromContext(ctx)
 	reqID := newReqID()
 	req := execproto.ExecRequest{
 		Cmd: args.Cmd, Args: args.Args, Cwd: args.Cwd, Env: args.Env, TimeoutMs: args.TimeoutMs,

@@ -11,7 +11,7 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	"github.com/pw0rld/agbridge/internal/mcp"
+	
 	"github.com/pw0rld/agbridge/internal/proto"
 )
 
@@ -198,7 +198,7 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
-	emit := mcp.EmitterFromContext(ctx)
+	emit := EmitterFromContext(ctx)
 	var bytesReceived int64
 
 	// If dest_path supplied, stream to local file (no buffering all in

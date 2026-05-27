@@ -10,7 +10,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
-	"github.com/pw0rld/agbridge/internal/mcp"
+	
 	"github.com/pw0rld/agbridge/internal/proto"
 )
 
@@ -43,7 +43,7 @@ func (r *Router) ReadFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
-	emit := mcp.EmitterFromContext(ctx)
+	emit := EmitterFromContext(ctx)
 	var bytesReceived int64
 	var content []byte
 	for {
