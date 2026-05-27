@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 		newCapsCmd(),
 		newLsCmd(),
 		newCatCmd(),
+		newStatCmd(),
 	)
 	return root
 }
