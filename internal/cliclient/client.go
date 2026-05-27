@@ -20,24 +20,16 @@ type Options struct {
 	GatewayTLSMode      string
 	E2EMode             string
 	BridgeStaticKeyPath string
-	// DaemonPubkey is the decoded X25519 public key (32 bytes) of the
-	// target daemon. config.BridgeConfig stores the base64-encoded form
-	// as a string; the CLI layer is responsible for decoding it before
-	// populating this field. OptionsFromBridgeConfig therefore leaves
-	// this nil — base64 decoding can fail and this constructor does not
-	// return an error.
-	DaemonPubkey []byte
+	// DaemonPubkey is the target daemon's X25519 public key, base64-
+	// encoded. Same shape as config.BridgeConfig.DaemonPubkey. Decoded
+	// at the Noise IK call site via e2e.PubFromBase64.
+	DaemonPubkey string
 	Target       string
 }
 
 // OptionsFromBridgeConfig translates an existing v0.0.1 BridgeConfig
 // to Options. Used by the CLI when loading state.json + applying a
 // target override.
-//
-// Note: DaemonPubkey is intentionally not copied here because
-// config.BridgeConfig.DaemonPubkey is base64-encoded (string) while
-// Options.DaemonPubkey is the decoded form ([]byte). Callers that need
-// E2E must decode and set Options.DaemonPubkey themselves.
 func OptionsFromBridgeConfig(cfg *config.BridgeConfig) Options {
 	return Options{
 		GatewayURL:          cfg.GatewayURL,
@@ -47,6 +39,7 @@ func OptionsFromBridgeConfig(cfg *config.BridgeConfig) Options {
 		GatewayTLSMode:      cfg.GatewayTLSMode,
 		E2EMode:             cfg.E2EMode,
 		BridgeStaticKeyPath: cfg.BridgeStaticKeyPath,
+		DaemonPubkey:        cfg.DaemonPubkey,
 		Target:              cfg.TargetDaemon,
 	}
 }
