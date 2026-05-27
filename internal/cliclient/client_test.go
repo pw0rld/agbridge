@@ -1,6 +1,7 @@
 package cliclient
 
 import (
+	"crypto/tls"
 	"testing"
 
 	"github.com/pw0rld/agbridge/internal/config"
@@ -28,5 +29,13 @@ func TestNewOptionsFromBridgeConfig(t *testing.T) {
 	}
 	if opts.Target != "lab01" {
 		t.Fatalf("target: %q", opts.Target)
+	}
+}
+
+func TestOptionsTLSConfigOverride(t *testing.T) {
+	cfg := &tls.Config{ServerName: "test"}
+	opts := Options{TLSConfig: cfg}
+	if opts.TLSConfig != cfg {
+		t.Fatalf("TLSConfig field not present on Options")
 	}
 }
