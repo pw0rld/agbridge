@@ -19,6 +19,7 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/audit"
 	"github.com/pw0rld/agbridge/internal/auth"
+	"github.com/pw0rld/agbridge/internal/cliclient"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/gateway"
 	"github.com/pw0rld/agbridge/internal/handshake"
@@ -39,6 +40,20 @@ type phase4Env struct {
 	rt         *router
 	gatewayURL string
 	cliCfg     *tls.Config
+}
+
+// newCLIOpts builds a cliclient.Options pointing at this fixture's
+// gateway. E2E is disabled (matches setupPhase4); TLS uses the
+// testcert via TLSConfig injection.
+func (e *phase4Env) newCLIOpts() cliclient.Options {
+	return cliclient.Options{
+		GatewayURL: e.gatewayURL,
+		AgentName:  "claude-laptop",
+		APIKey:     "api-key-1",
+		Target:     "lab01",
+		E2EMode:    "disabled",
+		TLSConfig:  e.cliCfg,
+	}
 }
 
 // reconnectBridge closes the bridge's current wss conn, waits for runReader
