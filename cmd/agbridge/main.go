@@ -29,6 +29,8 @@ func newRootCmd() *cobra.Command {
 		newIssueTokenCmd(), newEnrollCmd(),
 		newConfigCmd(), newLogoutCmd(), newDoctorCmd(),
 		newGatewayListDevicesCmd(), newGatewayRevokeCmd(),
+		// CLI subcommands (v0.0.2)
+		newTargetsCmd(),
 	)
 	return root
 }
