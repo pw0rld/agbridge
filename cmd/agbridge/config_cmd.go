@@ -17,6 +17,7 @@ func newConfigCmd() *cobra.Command {
 		Short: "Inspect local state",
 	}
 	parent.AddCommand(newConfigShowCmd())
+	parent.AddCommand(newConfigUseCmd())
 	return parent
 }
 
