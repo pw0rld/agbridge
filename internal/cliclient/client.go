@@ -167,32 +167,32 @@ func (c *Client) handshakeE2E(ctx context.Context) error {
 	}
 	init, err := e2e.NewInitiator(bridgeKey, daemonPub, prologue)
 	if err != nil {
-		return err
+		return fmt.Errorf("new initiator: %w", err)
 	}
 	msg1, err := init.WriteMessage1()
 	if err != nil {
-		return err
+		return fmt.Errorf("write msg1: %w", err)
 	}
 	if err := c.conn.Send(ctx, proto.Frame{
 		Type:    proto.FrameTypeNoiseInit,
 		ReqID:   hex.EncodeToString(sid[:]),
 		Payload: msg1,
 	}); err != nil {
-		return err
+		return fmt.Errorf("send NoiseInit: %w", err)
 	}
 	resp, err := c.conn.Recv(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("recv NoiseResp: %w", err)
 	}
 	if resp.Type == proto.FrameTypeError {
-		return fmt.Errorf("daemon rejected handshake: %s", string(resp.Payload))
+		return fmt.Errorf("daemon rejected handshake: %q", resp.Payload)
 	}
 	if resp.Type != proto.FrameTypeNoiseResp {
 		return fmt.Errorf("expected NoiseResp, got type %d", resp.Type)
 	}
 	sess, err := init.ReadMessage2(resp.Payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("read msg2: %w", err)
 	}
 	c.session = sess
 	c.sessionID = sid
