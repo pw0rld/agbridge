@@ -8,11 +8,14 @@ package cliclient
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport"
@@ -76,8 +79,10 @@ func Invoke(ctx context.Context, opts Options, fn func(ctx context.Context, c *C
 // existing tool handlers (exec, read_file, write_file, etc) bound to
 // this connection.
 type Client struct {
-	conn *wss.Conn
-	opts Options
+	conn      *wss.Conn
+	opts      Options
+	session   *e2e.Session // nil when E2EMode == "disabled"
+	sessionID [8]byte
 }
 
 // Close tears down the WSS connection.
@@ -127,6 +132,69 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("unexpected ack type: %v", ack.Type)
 	}
 	c := &Client{conn: conn, opts: opts}
-	// Noise IK is added in Task 1.5 — leave a hook here.
+	if opts.E2EMode != "disabled" {
+		if err := c.handshakeE2E(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("noise ik: %w", err)
+		}
+	}
 	return c, nil
+}
+
+// handshakeE2E runs the Noise IK initiator role over the live conn,
+// using the bridge static key from disk and the target daemon's public
+// key from opts. On success the session is stored on the Client so
+// subsequent tool calls can encrypt/decrypt Route payloads.
+//
+// Ported from cmd/agbridge/bridge.go (doBridgeNoiseHandshake + the
+// e2e setup half of newRouter). The CLI variant skips the router's
+// install-session / replace-conn dance — Client owns the conn until
+// Close().
+func (c *Client) handshakeE2E(ctx context.Context) error {
+	bridgeKey, err := e2e.LoadStatic(c.opts.BridgeStaticKeyPath)
+	if err != nil {
+		return fmt.Errorf("load static key %q: %w", c.opts.BridgeStaticKeyPath, err)
+	}
+	daemonPub, err := e2e.PubFromBase64(c.opts.DaemonPubkey)
+	if err != nil {
+		return fmt.Errorf("parse daemon_pubkey: %w", err)
+	}
+	prologue := []byte(fmt.Sprintf("agbridge/v1|%s|%s", c.opts.GatewayURL, c.opts.Target))
+
+	var sid [8]byte
+	if _, err := rand.Read(sid[:]); err != nil {
+		return fmt.Errorf("sid rand: %w", err)
+	}
+	init, err := e2e.NewInitiator(bridgeKey, daemonPub, prologue)
+	if err != nil {
+		return err
+	}
+	msg1, err := init.WriteMessage1()
+	if err != nil {
+		return err
+	}
+	if err := c.conn.Send(ctx, proto.Frame{
+		Type:    proto.FrameTypeNoiseInit,
+		ReqID:   hex.EncodeToString(sid[:]),
+		Payload: msg1,
+	}); err != nil {
+		return err
+	}
+	resp, err := c.conn.Recv(ctx)
+	if err != nil {
+		return err
+	}
+	if resp.Type == proto.FrameTypeError {
+		return fmt.Errorf("daemon rejected handshake: %s", string(resp.Payload))
+	}
+	if resp.Type != proto.FrameTypeNoiseResp {
+		return fmt.Errorf("expected NoiseResp, got type %d", resp.Type)
+	}
+	sess, err := init.ReadMessage2(resp.Payload)
+	if err != nil {
+		return err
+	}
+	c.session = sess
+	c.sessionID = sid
+	return nil
 }
