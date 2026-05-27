@@ -60,7 +60,7 @@ func newBridgeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tlsCfg, err := runtimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
+			tlsCfg, err := auth.RuntimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
 			if err != nil {
 				return err
 			}

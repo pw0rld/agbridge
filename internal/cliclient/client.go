@@ -8,10 +8,10 @@ package cliclient
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 
+	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -95,7 +95,7 @@ func (c *Client) Close() error {
 //
 // Returns a Client ready for one handler call.
 func dial(ctx context.Context, opts Options) (*Client, error) {
-	tlsCfg, err := buildTLSConfig(opts.GatewayTLSMode, opts.CertPin)
+	tlsCfg, err := auth.RuntimeTLSConfig(opts.GatewayTLSMode, opts.CertPin)
 	if err != nil {
 		return nil, fmt.Errorf("tls config: %w", err)
 	}
@@ -129,10 +129,4 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 	c := &Client{conn: conn, opts: opts}
 	// Noise IK is added in Task 1.5 — leave a hook here.
 	return c, nil
-}
-
-// buildTLSConfig is moved from cmd/agbridge/tlsmode.go in Task 1.4.
-// Stub here until then.
-func buildTLSConfig(mode, certPin string) (*tls.Config, error) {
-	return nil, fmt.Errorf("buildTLSConfig moves here in Task 1.4")
 }
