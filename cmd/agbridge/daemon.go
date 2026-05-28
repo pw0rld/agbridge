@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/bgproto"
 	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/config"
@@ -54,7 +55,7 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			tlsCfg, err := runtimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
+			tlsCfg, err := auth.RuntimeTLSConfig(cfg.GatewayTLSMode, cfg.CertPin)
 			if err != nil {
 				return err
 			}
