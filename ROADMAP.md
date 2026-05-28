@@ -6,7 +6,31 @@ Work tracked outside the issue tracker. Priorities:
 - **P1** — meaningful user-facing improvement
 - **P2** — defensive / edge case, can ship without
 
-## v0.3.0 (in progress, on `phase-c`)
+## v0.0.2 — CLI-first
+
+- Replace MCP stdio bridge with one-shot CLI surface
+- 14 commands: `status` / `targets` / `config use` / `caps` / `ai-help` /
+  `ls` / `cat` / `stat` / `grep` / `write` / `edit` / `exec` / `put` /
+  `get`
+- Stable error model: exit `0/1` + single-line JSON on stderr
+  (`{code, message, retry_safe}`)
+- `--json` output with top-level `_schema:1` for forward compat
+- `internal/mcp` package and `agbridge bridge` subcommand removed;
+  `agbridge enroll` no longer writes Claude Code / Codex / Cursor MCP
+  configs
+- Stateful tools (`port_forward`, `background_exec`, `kill_process`)
+  temporarily removed; planned for v0.0.3
+
+## v0.0.3 — Stateful tools + Trust + cross-border
+
+- Optional local daemon mode for `port_forward` / `background_exec` /
+  `kill_process` (the stateful tools that don't fit per-call CLI)
+- Trust extensions (broader threat-model coverage, multi-bridge fanout,
+  long-duration uptime validation)
+- Cross-border deployment scenarios (latency-tolerant gateway topology,
+  region-aware target selection)
+
+## v0.3.0 (legacy MCP track, frozen on `phase-c`)
 
 AI-UX improvements + bug fixes from stress and integration testing.
 
