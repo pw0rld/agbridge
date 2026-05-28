@@ -90,12 +90,6 @@ long as they can make outbound TLS connections to the gateway.
 ## Install
 
 ```bash
-curl -fsSL https://agbridge.cloud/install.sh | bash
-```
-
-From GitHub:
-
-```bash
 curl -sSL https://github.com/pw0rld/agbridge/raw/main/scripts/install.sh | bash
 ```
 
@@ -107,16 +101,11 @@ go install github.com/pw0rld/agbridge/cmd/agbridge@latest
 
 ## Quickstart
 
-Install the binary:
+Install the binary (see Install above), then enroll your device with a
+one-shot token from your gateway operator:
 
 ```bash
-curl -fsSL https://agbridge.cloud/install.sh | bash
-```
-
-Enroll your device:
-
-```bash
-agbridge enroll <token-from-dashboard>
+agbridge enroll <token>
 agbridge status   # verify the connection
 ```
 

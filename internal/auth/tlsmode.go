@@ -58,9 +58,10 @@ func RuntimeTLSConfig(mode, certPin string) (*tls.Config, error) {
 			return nil, fmt.Errorf("cert pin: %w", err)
 		}
 	case GatewayTLSModeWebPKI:
-		// Standard hostname + system CA verification. This is the hosted
-		// Cloudflare mode: TLS authenticates relay.agbridge.cloud at the edge;
-		// bridge<->daemon content secrecy is still provided by Noise E2E.
+		// Standard hostname + system CA verification. Used when the gateway
+		// sits behind a CA-issued certificate (e.g. a managed edge/CDN):
+		// TLS authenticates the gateway hostname, and bridge<->daemon
+		// content secrecy is still provided by Noise E2E.
 	}
 	return cfg, nil
 }
