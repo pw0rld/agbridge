@@ -64,6 +64,7 @@ func runCaps(cmd *cobra.Command, opts cliclient.Options) error {
 			"daemon_name":         caps.DaemonName,
 			"daemon_hostname":     caps.DaemonHostname,
 			"agbridge_version":    caps.AgbridgeVersion,
+			"exec_enabled":        caps.ExecEnabled,
 			"allowed_exec_cwds":   caps.AllowedExecCwds,
 			"allowed_read_paths":  caps.AllowedReadPaths,
 			"allowed_write_paths": caps.AllowedWritePaths,
@@ -77,6 +78,7 @@ func runCaps(cmd *cobra.Command, opts cliclient.Options) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "daemon_hostname:     %s\n", caps.DaemonHostname)
 	fmt.Fprintf(cmd.OutOrStdout(), "agbridge_version:    %s\n", caps.AgbridgeVersion)
 	fmt.Fprintf(cmd.OutOrStdout(), "max_file_bytes:      %d\n", caps.MaxFileBytes)
+	fmt.Fprintf(cmd.OutOrStdout(), "exec_enabled:        %v\n", caps.ExecEnabled)
 	fmt.Fprintf(cmd.OutOrStdout(), "allowed_exec_cwds:   %v\n", caps.AllowedExecCwds)
 	fmt.Fprintf(cmd.OutOrStdout(), "allowed_read_paths:  %v\n", caps.AllowedReadPaths)
 	fmt.Fprintf(cmd.OutOrStdout(), "allowed_write_paths: %v\n", caps.AllowedWritePaths)

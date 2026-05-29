@@ -54,6 +54,7 @@ type EnrollResponse struct {
 	DaemonPubkey string `json:"daemon_pubkey,omitempty"`
 
 	// For daemons:
+	ExecEnabled          bool     `json:"exec_enabled,omitempty"`
 	AllowedExecCwds      []string `json:"allowed_exec_cwds,omitempty"`
 	AllowedReadPaths     []string `json:"allowed_read_paths,omitempty"`
 	AllowedWritePaths    []string `json:"allowed_write_paths,omitempty"`
@@ -150,6 +151,7 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 			s.State.Daemons = append(s.State.Daemons, entry)
 		}
 		if tok.Policy != nil {
+			resp.ExecEnabled = tok.Policy.ExecEnabled
 			paths := expandPathShorthand(tok.Policy.AllowedPaths)
 			if len(tok.Policy.AllowedExecCwds) == 0 {
 				resp.AllowedExecCwds = append([]string(nil), paths...)

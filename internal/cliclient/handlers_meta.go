@@ -54,8 +54,9 @@ func (r *Router) CapabilitiesHandler(ctx context.Context, _ json.RawMessage) (an
 
 func renderCapabilities(c capabilities.Capabilities) string {
 	return fmt.Sprintf(
-		"daemon=%s hostname=%s version=%s\nallowed_exec_cwds=%v\nallowed_read_paths=%v\nallowed_write_paths=%v\nenv_allowlist=%v\nforbidden_ports=%v\nmax_file_bytes=%d",
+		"daemon=%s hostname=%s version=%s\nexec_enabled=%v\nallowed_exec_cwds=%v\nallowed_read_paths=%v\nallowed_write_paths=%v\nenv_allowlist=%v\nforbidden_ports=%v\nmax_file_bytes=%d",
 		c.DaemonName, c.DaemonHostname, c.AgbridgeVersion,
+		c.ExecEnabled,
 		c.AllowedExecCwds, c.AllowedReadPaths, c.AllowedWritePaths,
 		c.EnvAllowlist, c.ForbiddenPorts, c.MaxFileBytes,
 	)

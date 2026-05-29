@@ -26,7 +26,7 @@ func TestExecEchoSuccess(t *testing.T) {
 			stderr.Write(c.Data)
 		}
 	}
-	complete, err := Exec(context.Background(), req, []string{tmp + "/*", tmp}, []string{"PATH"}, collect)
+	complete, err := Exec(context.Background(), req, true, []string{"PATH"}, collect)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
@@ -41,15 +41,15 @@ func TestExecEchoSuccess(t *testing.T) {
 	}
 }
 
-func TestExecCwdForbidden(t *testing.T) {
+func TestExecDisabledRefused(t *testing.T) {
 	req := execproto.ExecRequest{
 		Cmd:       "/bin/true",
-		Cwd:       "/etc",
+		Cwd:       "/tmp",
 		TimeoutMs: 1000,
 	}
-	_, err := Exec(context.Background(), req, []string{"/home/user/*"}, nil, func(execproto.ExecChunk) {})
-	if err == nil {
-		t.Errorf("expected cwd error")
+	_, err := Exec(context.Background(), req, false, nil, func(execproto.ExecChunk) {})
+	if err != ErrExecDisabled {
+		t.Errorf("expected ErrExecDisabled, got %v", err)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestExecTimeoutKills(t *testing.T) {
 		TimeoutMs: 200,
 	}
 	start := time.Now()
-	complete, err := Exec(context.Background(), req, []string{tmp + "/*", tmp}, []string{"PATH"}, func(execproto.ExecChunk) {})
+	complete, err := Exec(context.Background(), req, true, []string{"PATH"}, func(execproto.ExecChunk) {})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestExecEnvWhitelist(t *testing.T) {
 		TimeoutMs: 5000,
 	}
 	var out strings.Builder
-	_, err := Exec(context.Background(), req, []string{tmp + "/*", tmp}, []string{"PATH"}, func(c execproto.ExecChunk) {
+	_, err := Exec(context.Background(), req, true, []string{"PATH"}, func(c execproto.ExecChunk) {
 		if c.Stream == "stdout" {
 			out.Write(c.Data)
 		}

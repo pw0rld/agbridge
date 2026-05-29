@@ -126,6 +126,7 @@ func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 		RegistrationToken:    s.APIKey,
 		CertPin:              s.Gateway.CertPin,
 		GatewayTLSMode:       s.Gateway.TLSMode,
+		ExecEnabled:          s.ExecEnabled,
 		AllowedExecCwds:      s.AllowedExecCwds,
 		EnvAllowlist:         s.EnvAllowlist,
 		AllowedReadPaths:     s.AllowedReadPaths,
@@ -466,13 +467,13 @@ func (s *daemonState) handleExec(ctx context.Context, inner proto.Frame) {
 		chunkPayload, _ := c.Encode()
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeExecChunk, ReqID: inner.ReqID, Payload: chunkPayload})
 	}
-	complete, runErr := tools.Exec(ctx, req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist, onChunk)
+	complete, runErr := tools.Exec(ctx, req, s.cfg.ExecEnabled, s.cfg.EnvAllowlist, onChunk)
 	if runErr != nil {
 		code := "exec_failed"
 		detail := ""
-		if runErr == tools.ErrCwdForbidden {
-			code = "path_forbidden"
-			detail = "cwd not in allowed_exec_cwds; allowed: " + sandbox.FormatAllowlist(s.cfg.AllowedExecCwds)
+		if runErr == tools.ErrExecDisabled {
+			code = "tool_forbidden"
+			detail = "exec disabled on this daemon"
 		}
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeError, ReqID: inner.ReqID, Payload: errcode.EncodeFramePayload(code, detail)})
 		return
@@ -489,6 +490,7 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 	caps := capabilities.Capabilities{
 		DaemonName:        s.cfg.DaemonName,
 		DaemonHostname:    hostname,
+		ExecEnabled:       s.cfg.ExecEnabled,
 		AllowedExecCwds:   append([]string(nil), s.cfg.AllowedExecCwds...),
 		AllowedReadPaths:  append([]string(nil), s.cfg.AllowedReadPaths...),
 		AllowedWritePaths: append([]string(nil), s.cfg.AllowedWritePaths...),
@@ -598,7 +600,7 @@ func (s *daemonState) handleBgExec(ctx context.Context, inner proto.Frame) {
 	var resp bgproto.BgExecResponse
 	switch req.Action {
 	case "start":
-		resp = s.bgReg.StartBg(req, s.cfg.AllowedExecCwds, s.cfg.EnvAllowlist)
+		resp = s.bgReg.StartBg(req, s.cfg.ExecEnabled, s.cfg.EnvAllowlist)
 	case "status":
 		resp = s.bgReg.Status(req)
 	case "logs":

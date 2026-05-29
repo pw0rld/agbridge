@@ -18,6 +18,7 @@ import (
 func TestCLIInvokeExecAgainstFixture(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
+		ExecEnabled:     true,
 		AllowedExecCwds: []string{tmpDir, tmpDir + "/*"},
 		EnvAllowlist:    []string{"PATH"},
 	})
