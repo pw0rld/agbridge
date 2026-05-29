@@ -70,7 +70,10 @@ func (r *Router) ReadFileHandler(ctx context.Context, raw json.RawMessage) (any,
 					emit(float64(bytesReceived), nil, "")
 				}
 			case proto.FrameTypeFileComplete:
-				c, _ := fileproto.DecodeFileComplete(f.Payload)
+				c, err := fileproto.DecodeFileComplete(f.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", "read_file: "+err.Error())), nil
+				}
 				return buildReadFileResult(content, c), nil
 			case proto.FrameTypeError:
 				return mcpErrorResult(errcode.New(string(f.Payload), "daemon error")), nil
@@ -183,7 +186,10 @@ func (r *Router) WriteFileHandler(ctx context.Context, raw json.RawMessage) (any
 			}
 			switch f.Type {
 			case proto.FrameTypeFileComplete:
-				c, _ := fileproto.DecodeFileComplete(f.Payload)
+				c, err := fileproto.DecodeFileComplete(f.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", "write_file: "+err.Error())), nil
+				}
 				if c.Err != "" {
 					msg := "write_file: " + c.Err
 					if c.ErrDetail != "" {
@@ -254,7 +260,10 @@ func (r *Router) EditFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		}
 		switch f.Type {
 		case proto.FrameTypeFileComplete:
-			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			c, err := fileproto.DecodeFileComplete(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "edit_file: "+err.Error())), nil
+			}
 			if c.Err != "" {
 				msg := "edit_file: " + c.Err
 				if c.ErrDetail != "" {
@@ -319,7 +328,10 @@ func (r *Router) StatHandler(ctx context.Context, raw json.RawMessage) (any, err
 		}
 		switch f.Type {
 		case proto.FrameTypeStatResponse:
-			resp, _ := fsproto.DecodeStatResponse(f.Payload)
+			resp, err := fsproto.DecodeStatResponse(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "stat: "+err.Error())), nil
+			}
 			if resp.Err != "" {
 				msg := "stat: " + resp.Err
 				if resp.ErrDetail != "" {
