@@ -61,7 +61,10 @@ func (r *Router) SearchHandler(ctx context.Context, raw json.RawMessage) (any, e
 		}
 		switch f.Type {
 		case proto.FrameTypeSearchResponse:
-			resp, _ := searchproto.DecodeSearchResponse(f.Payload)
+			resp, err := searchproto.DecodeSearchResponse(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "search: "+err.Error())), nil
+			}
 			if resp.Err != "" {
 				msg := "search: " + resp.Err
 				if resp.ErrDetail != "" {
@@ -128,7 +131,10 @@ func (r *Router) ListDirectoryHandler(ctx context.Context, raw json.RawMessage) 
 		}
 		switch f.Type {
 		case proto.FrameTypeListDirResponse:
-			resp, _ := fsproto.DecodeListDirResponse(f.Payload)
+			resp, err := fsproto.DecodeListDirResponse(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "list_directory: "+err.Error())), nil
+			}
 			if resp.Err != "" {
 				msg := "list_directory: " + resp.Err
 				if resp.ErrDetail != "" {

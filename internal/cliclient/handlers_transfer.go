@@ -140,7 +140,10 @@ func (r *Router) UploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 		}
 		switch f.Type {
 		case proto.FrameTypeFileComplete:
-			c, _ := fileproto.DecodeFileComplete(f.Payload)
+			c, err := fileproto.DecodeFileComplete(f.Payload)
+			if err != nil {
+				return mcpErrorResult(errcode.New("bad_payload", "upload: "+err.Error())), nil
+			}
 			if c.Err != "" {
 				msg := "upload: " + c.Err
 				if c.ErrDetail != "" {
@@ -247,7 +250,10 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 					emit(float64(bytesReceived), nil, "")
 				}
 			case proto.FrameTypeFileComplete:
-				c, _ := fileproto.DecodeFileComplete(fr.Payload)
+				c, err := fileproto.DecodeFileComplete(fr.Payload)
+				if err != nil {
+					return mcpErrorResult(errcode.New("bad_payload", "download: "+err.Error())), nil
+				}
 				if c.Err != "" {
 					msg := "download: " + c.Err
 					if c.ErrDetail != "" {
