@@ -56,6 +56,7 @@ type DaemonConfig struct {
 	RegistrationToken string   `yaml:"registration_token"`
 	CertPin           string   `yaml:"cert_pin"`
 	GatewayTLSMode    string   `yaml:"gateway_tls_mode"`
+	ExecEnabled       bool     `yaml:"exec_enabled"`
 	AllowedExecCwds   []string `yaml:"allowed_exec_cwds"`
 	EnvAllowlist      []string `yaml:"env_allowlist"`
 	AllowedReadPaths  []string `yaml:"allowed_read_paths"`

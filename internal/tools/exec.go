@@ -14,14 +14,13 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/execproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // MaxBytesPerStream caps stdout / stderr per request. Phase 4 will raise to 10 MB.
 const MaxBytesPerStream = 1 << 20 // 1 MB
 
-// ErrCwdForbidden is returned when ExecRequest.Cwd is not in the allowlist.
-var ErrCwdForbidden = errors.New("tools: cwd not in allowed_exec_cwds")
+// ErrExecDisabled is returned when the daemon's exec capability is off.
+var ErrExecDisabled = errors.New("tools: exec disabled on this daemon")
 
 // OnChunk is called for each non-empty stdout/stderr chunk during exec.
 type OnChunk func(execproto.ExecChunk)
@@ -29,12 +28,15 @@ type OnChunk func(execproto.ExecChunk)
 // osEnviron is a seam for tests; defaults to os.Environ.
 var osEnviron = os.Environ
 
-// Exec runs req under sandbox constraints and streams chunks via onChunk.
-// envAllowlist lists environment variable names whose current-process value
-// is forwarded to the subprocess; everything else is dropped.
-func Exec(ctx context.Context, req execproto.ExecRequest, allowedCwds, envAllowlist []string, onChunk OnChunk) (execproto.ExecComplete, error) {
-	if _, ok := sandbox.PathAllowedResolved(req.Cwd, allowedCwds); !ok {
-		return execproto.ExecComplete{}, ErrCwdForbidden
+// Exec runs req and streams chunks via onChunk. execEnabled is the daemon's
+// exec capability switch: when false, exec is refused outright (the cwd is no
+// longer a sandbox gate — once exec is on, the bound is the daemon's OS user
+// + env allowlist). envAllowlist lists environment variable names whose
+// current-process value is forwarded to the subprocess; everything else is
+// dropped.
+func Exec(ctx context.Context, req execproto.ExecRequest, execEnabled bool, envAllowlist []string, onChunk OnChunk) (execproto.ExecComplete, error) {
+	if !execEnabled {
+		return execproto.ExecComplete{}, ErrExecDisabled
 	}
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
