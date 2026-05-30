@@ -271,6 +271,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 			Gateway:              state.GatewayRef{URL: gwURL, CertPin: certPinForState(tlsMode, enrollResp.CertPin), TLSMode: tlsModeForState(tlsMode)},
 			NoiseStaticKeyPath:   keyPath,
 			E2EMode:              enrollResp.E2EMode,
+			ExecEnabled:          enrollResp.ExecEnabled,
 			AllowedExecCwds:      enrollResp.AllowedExecCwds,
 			AllowedReadPaths:     enrollResp.AllowedReadPaths,
 			AllowedWritePaths:    enrollResp.AllowedWritePaths,

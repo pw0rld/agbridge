@@ -22,6 +22,7 @@ func newIssueTokenCmd() *cobra.Command {
 		role           string
 		name           string
 		target         string
+		execEnabled    bool
 		allowedPaths   []string
 		forbiddenPorts []int
 		ttlMinutes     int
@@ -61,6 +62,7 @@ widen the policy on its end.`,
 			req := gateway.TokenRequest{Role: role, Name: name, Target: target, TTL: ttl}
 			if role == "daemon" {
 				req.Policy = &gateway.DaemonPolicy{
+					ExecEnabled:    execEnabled,
 					AllowedPaths:   allowedPaths,
 					ForbiddenPorts: forbiddenPorts,
 				}
@@ -97,7 +99,8 @@ widen the policy on its end.`,
 	cmd.Flags().StringVar(&role, "role", "", "bridge or daemon")
 	cmd.Flags().StringVar(&name, "name", "", "device name (unique within tenant)")
 	cmd.Flags().StringVar(&target, "target", "", "target daemon name (for bridge tokens)")
-	cmd.Flags().StringSliceVar(&allowedPaths, "allowed-paths", nil, "daemon-only: filesystem paths the daemon may exec/read/write (repeatable)")
+	cmd.Flags().BoolVar(&execEnabled, "exec-enabled", false, "daemon-only: allow the daemon to run exec/bg-exec (default off)")
+	cmd.Flags().StringSliceVar(&allowedPaths, "allowed-paths", nil, "daemon-only: filesystem paths the daemon may read/write (repeatable)")
 	cmd.Flags().IntSliceVar(&forbiddenPorts, "forbidden-ports", nil, "daemon-only: TCP ports port_forward refuses (repeatable)")
 	cmd.Flags().IntVar(&ttlMinutes, "ttl", 15, "token TTL in minutes")
 	cmd.Flags().BoolVar(&emitJSON, "json", false, "emit machine-readable JSON")

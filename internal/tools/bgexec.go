@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/bgproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // BgBufferCap is the per-stream ring buffer size. Older bytes are dropped
@@ -140,20 +139,20 @@ func genProcessID() string {
 }
 
 // StartBg spawns a new background process and registers it. Returns the
-// newly-assigned process_id. Cwd is checked against allowedCwds before
-// spawn.
-func (r *BgRegistry) StartBg(req bgproto.BgExecRequest, allowedCwds, envAllowlist []string) bgproto.BgExecResponse {
+// newly-assigned process_id. execEnabled is the daemon's exec capability
+// switch: when false, the spawn is refused outright.
+func (r *BgRegistry) StartBg(req bgproto.BgExecRequest, execEnabled bool, envAllowlist []string) bgproto.BgExecResponse {
 	if req.Cmd == "" {
 		return bgproto.BgExecResponse{Action: "start", Err: "bad_payload", ErrDetail: "cmd required"}
 	}
 	if req.Cwd == "" {
 		return bgproto.BgExecResponse{Action: "start", Err: "bad_payload", ErrDetail: "cwd required"}
 	}
-	if _, ok := sandbox.PathAllowedResolved(req.Cwd, allowedCwds); !ok {
+	if !execEnabled {
 		return bgproto.BgExecResponse{
 			Action:    "start",
-			Err:       "path_forbidden",
-			ErrDetail: "cwd not in allowed_exec_cwds; allowed: " + sandbox.FormatAllowlist(allowedCwds),
+			Err:       "tool_forbidden",
+			ErrDetail: "exec disabled on this daemon",
 		}
 	}
 
