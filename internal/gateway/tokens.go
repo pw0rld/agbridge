@@ -28,6 +28,7 @@ type Token struct {
 // DaemonPolicy is pre-set by the gateway operator at issue-token time.
 // Daemon enroll request cannot widen these (v0.2 may add shrinking).
 type DaemonPolicy struct {
+	ExecEnabled          bool     `json:"exec_enabled,omitempty"`
 	AllowedExecCwds      []string `json:"allowed_exec_cwds,omitempty"`
 	AllowedReadPaths     []string `json:"allowed_read_paths,omitempty"`
 	AllowedWritePaths    []string `json:"allowed_write_paths,omitempty"`
