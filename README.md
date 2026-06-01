@@ -10,37 +10,29 @@
 
 </div>
 
-agbridge gives AI assistants a structured CLI for operating machines
-that are hard to reach directly: lab workstations, cloud VMs behind
-firewalls, home servers, customer VPCs, GPU boxes, CI runners, and
-corporate networks. Each AI invocation spawns a fresh `agbridge <cmd>`
-subprocess that dials the gateway, runs one tool, and exits.
+agbridge lets AI assistants operate remote machines that are hard to
+reach directly: lab workstations, cloud VMs behind firewalls, home
+servers, customer VPCs, GPU boxes, CI runners, and corporate networks.
 
-Both sides dial out over TLS WebSocket. The gateway is the only public
-listener. Tool payloads can be end-to-end encrypted between the CLI
-client and the remote daemon, so the gateway acts as a relay and control
-plane rather than a remote shell host.
+The AI does not connect to an MCP server. It runs normal shell commands
+such as `agbridge ls`, `agbridge cat`, `agbridge exec`, `agbridge put`,
+and `agbridge get`. Each command starts a fresh subprocess, dials the
+gateway, invokes one remote operation, prints a stable result, and exits.
+
+Both the CLI client and daemon dial out over TLS WebSocket. The gateway
+is the only public listener. Inner tool payloads can be encrypted
+end-to-end between the CLI client and the daemon, so the gateway acts as
+a relay and control plane rather than a remote shell host.
 
 ```
-   ┌───────────────┐     ┌──────────────┐     ┌───────────────┐
-   │   AI Agent    │     │              │     │               │
-   │ (Codex,       │     │   gateway    │     │    daemon     │
-   │  Claude, ...) │     │  (public IP) │     │ (lab/cloud/   │
-   └───────┬───────┘     └───────┬──────┘     │  corporate)   │
-           │ spawns subprocess   │            └───────┬───────┘
-   ┌───────▼───────┐             │                    │
-   │ agbridge <cmd>│             │                    │
-   │  (one-shot)   │             │                    │
-   └───────┬───────┘             │                    │
-           │                     │                    │
-           │  TLS:443 WSS  ──────►              ◄──── │   TLS:443 WSS
-           │  outbound only      │                    │   outbound only
-           └─────────────────────┴────────────────────┘
-                       relay + enrollment + audit
-                                 │
-                                 ▼
-                    CLI <-> daemon E2E payloads
-                       Noise IK + ChaCha20-Poly1305
+AI agent
+  |
+  | spawns one command
+  v
+agbridge <subcommand>  -- outbound TLS/WSS -->  gateway  <-- outbound TLS/WSS --  daemon
+       |                                                                           |
+       |_____________________ Noise IK + ChaCha20-Poly1305 ________________________|
+                                      inner payloads
 ```
 
 ## Why
@@ -51,41 +43,44 @@ earlier:
 
 - The target machine cannot accept inbound connections.
 - The operator does not want to expose SSH or a broad VPN route.
-- The AI client needs structured tool results instead of terminal text.
-- Security wants path, port, environment, and audit boundaries around
-  what the agent can do.
+- The AI needs stable command output and structured errors, not an
+  interactive terminal session.
+- Security wants local daemon policy: read/write path allowlists,
+  explicit exec enablement, environment filtering, and audit logs.
 
 agbridge is designed for that gap. It is not a VPN replacement and it is
-not trying to beat OpenSSH at SSH. It provides an AI-native remote
-operation plane: bounded tools, typed errors, discoverable capabilities,
-file streaming, and optional TCP forwarding.
+not trying to beat OpenSSH at SSH. It provides a narrow remote operation
+surface that is easy for an AI agent to call from a shell.
 
 ## Components
 
 | Component | Runs on | Purpose |
 |---|---|---|
 | `agbridge gateway` | Public host or ingress | Authenticates devices, relays frames, serves `/v1/enroll`, writes audit logs |
-| `agbridge daemon` | Remote machine | Executes tools under sandbox policy and dials the gateway outbound |
-| `agbridge <subcommand>` (CLI on AI client host) | AI client host | One-shot subcommands (`ls`, `cat`, `exec`, etc.) that dial the gateway, invoke one tool, and exit. AI agents drive these via subprocess spawning. |
+| `agbridge daemon` | Remote machine | Executes file/command/transfer tools under daemon policy and dials the gateway outbound |
+| `agbridge <subcommand>` | AI client host | One-shot CLI calls (`ls`, `cat`, `exec`, etc.) that dial the gateway, invoke one operation, and exit |
 
-The CLI client and daemon can be behind NAT or restrictive firewalls as
-long as they can make outbound TLS connections to the gateway.
+The enrollment role for the CLI client is still named `bridge` in flags
+and state files for protocol compatibility. In v0.0.2, that means a CLI
+client identity, not a long-running MCP stdio process.
 
 ## Features
 
-- **CLI tool surface**: `agbridge ls / cat / exec / write / edit / search / put / get / stat / caps / status / targets / config use / ai-help` covering remote filesystem, command execution, and file transfer.
-- **Outbound-only networking**: no inbound port on the AI client host or
-  daemon host.
-- **End-to-end payload encryption**: Noise IK with ChaCha20-Poly1305;
-  the gateway relays encrypted inner frames when E2E mode is enabled.
-- **Cert pinning**: SHA-256 pin over the gateway certificate, no system
-  CA trust required.
-- **Enrollment flow**: one-shot tokens and paste-command onboarding.
-  Devices generate keys locally and write `state.json`.
-- **Daemon sandbox**: non-root startup check, path allowlists, port
-  denylist, environment allowlist, file size caps, and typed errors.
-- **Operational resilience**: reconnect with backoff, WebSocket
-  keepalive, SIGHUP revocation, and rotating JSONL audit logs.
+- **CLI-first AI surface**: `status`, `targets`, `config use`, `caps`,
+  `ai-help`, `ls`, `cat`, `stat`, `grep`, `write`, `edit`, `exec`,
+  `put`, and `get`.
+- **Outbound-only connectivity**: no inbound port on the AI client host
+  or daemon host.
+- **End-to-end payload encryption**: Noise IK with
+  ChaCha20-Poly1305 for inner CLI<->daemon frames.
+- **Gateway TLS modes**: certificate pinning by default; WebPKI mode for
+  hosted TLS frontends such as Cloudflare.
+- **One-shot enrollment**: gateway-issued tokens, local Noise key
+  generation, and per-device `state.json`.
+- **Daemon policy**: file read/write allowlists, `exec_enabled`, env
+  allowlist, non-root daemon startup, file size caps, typed errors.
+- **AI-friendly output**: human output by default, `--json` with
+  `_schema:1`, and single-line structured error JSON on stderr.
 
 ## Install
 
@@ -101,101 +96,187 @@ go install github.com/pw0rld/agbridge/cmd/agbridge@latest
 
 ## Quickstart
 
-Install the binary (see Install above), then enroll your device with a
-one-shot token from your gateway operator:
+If a gateway operator gives you a paste command, run it on the device
+being enrolled. It installs the binary and calls `agbridge enroll` with
+the right gateway URL and token.
+
+Manual enrollment uses explicit flags:
 
 ```bash
-agbridge enroll <token>
-agbridge status   # verify the connection
+agbridge enroll \
+  --gateway wss://gw.example.com/ \
+  --token et_XXXXXXXXXXXXXXXXXX
+
+agbridge status
+agbridge caps
 ```
 
-Use from your AI:
+For Cloudflare or another normal WebPKI TLS frontend:
 
-- Tell the AI to run `agbridge` commands directly — no MCP setup required.
-- Run `agbridge ai-help` to print a cheat sheet you can paste into the
-  AI's system prompt.
+```bash
+agbridge enroll \
+  --gateway wss://gw.example.com/ \
+  --token et_XXXXXXXXXXXXXXXXXX \
+  --tls-mode webpki
+```
 
-For operators self-hosting the gateway, see [QUICKSTART.md](QUICKSTART.md)
-for the full walkthrough (gateway setup, token issuance, daemon enrollment).
+After enrollment, tell the AI to run `agbridge` commands directly. The
+embedded helper is designed to be pasted into an AI session:
 
-## Recommended Use
+```bash
+agbridge ai-help
+```
 
-agbridge has two useful modes. They can be mixed.
+Self-hosting operators can bootstrap the gateway with:
 
-### Direct CLI
+```yaml
+listen: 0.0.0.0:443
+public_url: wss://gw.example.com/
+audit_path: /var/log/agbridge/audit.jsonl
+agents: []
+daemons: []
+```
 
-Use the CLI directly when SSH is not available, when you want tighter
-tool-level control, or when AI agents benefit from structured results.
+```bash
+agbridge cert gen --cn gw.example.com --out /etc/agbridge
 
-Examples:
+agbridge gateway \
+  --config /etc/agbridge/gateway.yaml \
+  --cert /etc/agbridge/cert.pem \
+  --key /etc/agbridge/key.pem
+```
 
-- `agbridge grep <pattern> <path>` instead of `ssh grep`
-- `agbridge cat <path>` with `--offset` / `--limit` instead of `ssh cat`
-- `agbridge edit <path> --old <s> --new <s>` with an exact old string
-  instead of remote shell edits
-- `agbridge get <remote> <local>` for downloading files
+Issue a daemon token with the file policy and optional exec capability:
 
-### Tunnel to SSH
+```bash
+agbridge issue-token \
+  --config /etc/agbridge/gateway.yaml \
+  --role daemon \
+  --name lab01 \
+  --allowed-paths /home/me/projects \
+  --exec-enabled
+```
 
-When `agbridge` ships TCP forwarding (planned v0.0.3 via local daemon
-mode), the recommended pattern for interactive shells is to use the CLI
-for egress-only reachability and let `sshd` handle accounts, authorized
-keys, and mature audit controls.
+Then issue a CLI-client token targeting that daemon:
+
+```bash
+agbridge issue-token \
+  --config /etc/agbridge/gateway.yaml \
+  --role bridge \
+  --name peter-laptop \
+  --target lab01
+```
+
+## Everyday Usage
+
+Start with the connection and policy:
+
+```bash
+agbridge status
+agbridge caps
+agbridge targets
+```
+
+Read and inspect files:
+
+```bash
+agbridge ls /home/me/projects
+agbridge ls -R --depth 2 /home/me/projects
+agbridge cat /home/me/projects/app/README.md
+agbridge cat --offset 0 --limit 4096 /home/me/projects/app/big.log
+agbridge stat /home/me/projects/app/main.go
+agbridge grep "TODO" /home/me/projects --max-results 20
+```
+
+Write, edit, and transfer:
+
+```bash
+agbridge write /home/me/projects/app/.env --content "DEBUG=1\n"
+agbridge write /home/me/projects/app/config.json --from-file /tmp/config.json
+agbridge edit /home/me/projects/app/main.go --old "localhost" --new "127.0.0.1"
+agbridge put /tmp/build.tar.gz /home/me/projects/app/build.tar.gz
+agbridge get /home/me/projects/app/result.log /tmp/result.log
+```
+
+Run a remote command when daemon policy enables exec:
+
+```bash
+agbridge exec --cwd /home/me/projects/app --exec-timeout 120000 -- go test ./...
+```
+
+Use `-t/--target` to override the default daemon for a single call:
+
+```bash
+agbridge -t lab02 status
+agbridge -t lab02 cat /home/me/projects/app/README.md
+```
 
 ## CLI Reference
 
-See `agbridge --help` for the full command list. v0.0.2 surface:
-
 | Command | Purpose |
 |---|---|
-| `agbridge status` | Connection check |
-| `agbridge targets` | List known daemons |
-| `agbridge config use <name>` | Set default target |
-| `agbridge caps` | Show daemon sandbox / version |
-| `agbridge ai-help` | Cheat sheet for AI system prompts |
-| `agbridge ls <path>` | List directory |
-| `agbridge cat <path>` | Read file |
-| `agbridge stat <path>` | File metadata |
+| `agbridge status` | Dial, authenticate, run E2E handshake, and report connectivity |
+| `agbridge targets` | List daemon targets known to local state |
+| `agbridge config use <name>` | Set the default daemon target |
+| `agbridge caps` | Show daemon policy, hostname, version, and file limits |
+| `agbridge ai-help` | Print a compact AI instruction sheet |
+| `agbridge ls [-R] [--depth N] <path>` | List directory entries |
+| `agbridge cat [--offset N] [--limit N] <path>` | Read a file to stdout |
+| `agbridge stat <path>` | Show file metadata |
 | `agbridge grep <pattern> [path]` | Search file contents |
-| `agbridge write <path>` | Write file (`--content` or `--from-file`) |
-| `agbridge edit <path> --old <s> --new <s>` | Find-and-replace |
-| `agbridge exec -- <cmd>` | Run command remotely |
-| `agbridge put <local> <remote>` | Upload |
-| `agbridge get <remote> <local>` | Download |
+| `agbridge write <path>` | Write from `--content`, `--from-file`, or stdin |
+| `agbridge edit <path> --old <s> --new <s>` | Atomic find-and-replace |
+| `agbridge exec [--cwd PATH] -- <cmd> [args...]` | Run one non-interactive command |
+| `agbridge put <local> <remote>` | Upload a local file to the daemon |
+| `agbridge get <remote> <local>` | Download a daemon file to the CLI host |
 
-Global flags: `-t/--target`, `--json`, `--state-dir`, `--timeout`.
+Global flags:
 
-Output: human-readable by default; `--json` switches to stable structured
-shape with top-level `_schema:1`.
+- `-t, --target <name>`: override the default daemon target.
+- `--json`: emit stable JSON on stdout.
+- `--state-dir <dir>`: use a non-default local state directory.
+- `--timeout <duration>`: per-call network/tool timeout.
 
-Errors: exit `0` on success, `1` on error. Stderr carries single-line
-JSON `{"code":"...","message":"...","retry_safe":bool}` on failure.
+Output contract:
+
+- Success exits `0`.
+- Operational failure exits `1`.
+- `--json` adds top-level `_schema: 1` to stdout payloads.
+- Every command failure writes exactly one JSON object to stderr:
+  `{"code":"...","message":"...","retry_safe":true|false}`.
+- Branch on `code`, not `message`.
 
 ## Security Model
 
 | Layer | What it protects |
 |---|---|
-| TLS 1.3 + cert pin | Transport encryption and gateway identity without system CA trust |
-| HMAC-SHA256 | Bridge-to-gateway Route frame integrity using the bridge API key |
-| Noise IK E2E | Inner tool payload confidentiality from the gateway |
-| Daemon bridge ACL | Optional bridge public-key allowlist on the daemon |
-| Path allowlists | `exec`, read, write, edit, search, upload, and download are scoped to enrolled paths |
-| Port denylist | `port_forward` refuses configured remote ports |
+| TLS 1.3 | Transport encryption to the gateway |
+| Cert pin or WebPKI | Gateway identity, depending on `--tls-mode` / stored state |
+| HMAC-SHA256 | CLI-client-to-gateway Route frame integrity using the API key |
+| Noise IK E2E | Inner CLI<->daemon payload confidentiality from the gateway |
+| Daemon client ACL | Optional client public-key allowlist on the daemon |
+| File path allowlists | `cat`, `ls`, `stat`, `grep`, `write`, `edit`, `put`, and `get` stay within enrolled paths |
+| `exec_enabled` | `agbridge exec` is denied unless explicitly enabled for the daemon |
+| Env allowlist | Only configured environment variables are forwarded to remote subprocesses |
 | Non-root daemon | Daemon refuses to run as root outside tests |
-| Environment allowlist | Only configured environment variables are forwarded to subprocesses |
+
+Important policy detail: file allowlists do not sandbox `exec`. When
+`exec_enabled` is true, the command runs as the daemon OS user and can
+access what that user can access. Use `agbridge caps` before assuming a
+path is or is not reachable.
 
 ### E2E Modes
 
 - `disabled`: legacy plaintext inner frames; gateway can see tool
   payloads.
-- `optional`: Noise IK is negotiated; an empty daemon bridge allowlist
-  accepts authenticated bridges for the same tenant.
+- `optional`: Noise IK is negotiated; an empty daemon client allowlist
+  accepts authenticated CLI clients for the same tenant.
 - `required`: daemon requires a non-empty `allowed_bridge_pubkeys` list
-  and rejects unpinned bridges.
+  and rejects unpinned clients.
 
-New bridge enrollments use `required`. New daemon enrollments default to
-`optional` so the first daemon can be enrolled before any bridge public
-key exists.
+New CLI-client enrollments use `required`. New daemon enrollments
+default to `optional` so the first daemon can be enrolled before any
+client public key exists.
 
 ## Operator Commands
 
@@ -204,8 +285,9 @@ Gateway operator commands:
 | Command | Purpose |
 |---|---|
 | `agbridge gateway --config ... --cert ... --key ...` | Run the rendezvous server |
-| `agbridge issue-token --role bridge|daemon --name ...` | Mint one-shot enrollment tokens |
-| `agbridge gateway-list-devices --config ...` | List enrolled devices and outstanding tokens |
+| `agbridge issue-token --role daemon --name ...` | Mint a daemon enrollment token |
+| `agbridge issue-token --role bridge --name ... --target ...` | Mint a CLI-client enrollment token |
+| `agbridge gateway-list-devices --config ...` | List enrolled clients, daemons, and outstanding tokens |
 | `agbridge gateway-revoke --config ... --name ...` | Remove a device from gateway state |
 
 Device commands:
@@ -226,46 +308,31 @@ Helpers:
 | `agbridge keygen --type secret` | Generate a random secret and hash |
 | `agbridge keygen --type noise` | Generate an X25519 keypair |
 
-Most operational commands support `--json` for automation.
-
 ## Architecture Details
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  L4  Inner payload (JSON, type-specific)              │
-│      ExecRequest / FileChunk / StreamData / ...       │
-├────────────────────────────────────────────────────────┤
-│  L3  E2E AEAD envelope                                │
-│      Noise IK session + ChaCha20-Poly1305             │
-├────────────────────────────────────────────────────────┤
-│  L2  proto.Frame                                      │
-│      version|type|reqid_len|reqid|payload_len|payload │
-├────────────────────────────────────────────────────────┤
-│  L1  WebSocket binary messages                        │
-│      Ping every 30s, dead connection after 90s        │
-├────────────────────────────────────────────────────────┤
-│  L0  TLS 1.3 + cert pin                               │
-└────────────────────────────────────────────────────────┘
+L4  Inner JSON payloads
+    ExecRequest / FileChunk / SearchRequest / ...
+
+L3  Optional E2E AEAD envelope
+    Noise IK session + ChaCha20-Poly1305
+
+L2  proto.Frame
+    version | type | reqid | payload
+
+L1  WebSocket binary messages
+    outbound from CLI client and daemon to gateway
+
+L0  TLS 1.3
+    cert pin or WebPKI gateway authentication
 ```
 
 The gateway runs a single TLS server. WebSocket upgrade requests go to
-the bridge/daemon relay. `POST /v1/enroll` goes to the enrollment
-handler. Both share the same certificate and pin.
-
-## Resilience
-
-- Reconnect uses exponential backoff with jitter.
-- In-flight tool calls fail as `network_lost` with retry metadata.
-- WebSocket keepalive closes stale connections.
-- Gateway SIGHUP reloads config and persisted gateway state, then
-  revokes sessions whose credentials were removed or rotated.
-- Duplicate bridge identity is handled by sending `session_replaced` to
-  the older bridge and exiting it with status 75.
-- Audit logs are JSONL and rotate by size and backup count.
+the CLI/daemon relay. `POST /v1/enroll` goes to the enrollment handler.
 
 ## Status
 
-Current release: v0.0.2 (CLI-first).
+Current release line: v0.0.2, CLI-first.
 
 | Area | Status |
 |---|---|
@@ -273,26 +340,25 @@ Current release: v0.0.2 (CLI-first).
 | Noise IK E2E payload encryption | Shipped |
 | Enrollment and `state.json` UX | Shipped |
 | CLI tool surface (14 commands) | Shipped |
-| MCP stdio bridge | Removed in v0.0.2 (replaced by CLI) |
-| Stateful tools (`port_forward`, `background_exec`, `kill_process`) | Deferred to v0.0.3 (optional local daemon mode) |
+| MCP stdio bridge | Removed in v0.0.2 |
+| Stateful tools (`port_forward`, `background_exec`, `kill_process`) | Deferred to v0.0.3 |
 | Long-duration, multi-site uptime validation | Not complete |
 | seccomp/cgroup sandboxing | Deferred |
 | Windows daemon support | Deferred |
 
 ## Known Limitations
 
-- `port_forward`, `background_exec`, and `kill_process` are temporarily
-  unavailable in v0.0.2; planned for v0.0.3 via an optional local daemon
-  mode.
-- `exec` is non-interactive. A real TTY needs the v0.0.3 stateful tool
-  path.
-- One daemon currently has one active CLI writer at a time. A newer
-  client with the same identity replaces the older session cleanly, but
-  true multi-client fanout is deferred.
-- E2E session keys are scoped to a WSS connection. Rekey while connected
-  is deferred; reconnecting creates a fresh session.
-- Widening daemon `allowed_bridge_pubkeys` requires re-enrolling or
-  otherwise updating daemon state.
+- `port_forward`, background process management, and remote process kill
+  are not available in v0.0.2. They need a long-lived local process and
+  are planned for v0.0.3.
+- `agbridge exec` is non-interactive and does not provide a TTY.
+- One CLI client identity currently holds one active session at a time.
+  Run commands serially; concurrent calls may return
+  `concurrent_not_supported`.
+- E2E session keys are scoped to one WSS connection. Each one-shot CLI
+  call creates a fresh connection and fresh session.
+- Widening daemon client pubkey allowlists requires re-enrolling or
+  updating daemon state.
 - The daemon sandbox is policy-based and process-level. It is not a
   seccomp/cgroup jail yet.
 
