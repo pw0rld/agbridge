@@ -265,6 +265,101 @@ func auditContains(t *testing.T, path, ev, name string) bool {
 	return false
 }
 
+// auditEventBytes scans the audit JSONL file for the first record whose
+// event field matches `ev` and returns its "bytes" field. Returns
+// (0, false) when no such record carries a numeric bytes field — which
+// is exactly the "No byte metadata yet" condition the dashboard renders.
+func auditEventBytes(t *testing.T, path, ev string) (int64, bool) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["event"] != ev {
+			continue
+		}
+		if n, ok := rec["bytes"].(float64); ok {
+			return int64(n), true
+		}
+	}
+	return 0, false
+}
+
+// TestAuditRouteRecordsBytes verifies the gateway records the relayed
+// frame size on route audit events. The cloud dashboard derives its
+// Traffic figure from this field; without it usage shows a permanent
+// "No byte metadata yet / 0 B". It is the gateway's only honest traffic
+// signal — frames are E2E encrypted, so size is all it can see.
+func TestAuditRouteRecordsBytes(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	auditPath := filepath.Join(t.TempDir(), "a.jsonl")
+	w, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer w.Close()
+	cfg := newTestConfig(t)
+	inst, err := Run(ctx, srvCfg, cfg, w)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
+
+	daemonConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("daemon dial: %v", err)
+	}
+	defer daemonConn.Close()
+	sendHello(t, ctx, daemonConn, handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1"})
+	if ack, err := daemonConn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon hello ack: %v %v", err, ack.Type)
+	}
+	// Drain whatever the daemon receives so handleBridge completes its send.
+	go func() { _, _ = daemonConn.Recv(ctx) }()
+
+	bridgeConn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("bridge dial: %v", err)
+	}
+	defer bridgeConn.Close()
+	sendHello(t, ctx, bridgeConn, handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"})
+	if ack, err := bridgeConn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridge hello ack: %v %v", err, ack.Type)
+	}
+	innerPing, _ := proto.Frame{Type: proto.FrameTypePing, ReqID: "r10"}.Encode()
+	signed := auth.SignFrame([]byte("api-key-1"), innerPing)
+	if err := bridgeConn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: signed}); err != nil {
+		t.Fatalf("bridge send route: %v", err)
+	}
+
+	// The route audit record is written before the frame is forwarded; poll
+	// until it lands, then assert it carries a positive byte count.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n, ok := auditEventBytes(t, auditPath, "route"); ok {
+			if n <= 0 {
+				t.Fatalf("route audit bytes = %d, want > 0", n)
+			}
+			if int64(len(signed)) != n {
+				t.Errorf("route audit bytes = %d, want frame size %d", n, len(signed))
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("route audit record never carried a bytes field")
+}
+
 func TestBridgePingRoutesToDaemon(t *testing.T) {
 	srvCfg, cliCfg := testcerts.MustGenerate(t)
 	ctx, cancel := context.WithCancel(context.Background())
