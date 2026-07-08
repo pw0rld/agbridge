@@ -16,10 +16,11 @@ import (
 // permanently marked used (stored on disk).
 type Token struct {
 	Token     string        `json:"token"`
-	Role      string        `json:"role"`             // "bridge" | "daemon"
-	Name      string        `json:"name"`             // device name
-	Target    string        `json:"target,omitempty"` // bridge only: target daemon
-	Policy    *DaemonPolicy `json:"policy,omitempty"` // daemon only
+	Role      string        `json:"role"`              // "bridge" | "daemon"
+	Name      string        `json:"name"`              // device name
+	Target    string        `json:"target,omitempty"`  // bridge only: first target daemon (compat)
+	Targets   []string      `json:"targets,omitempty"` // bridge only: all authorized target daemons
+	Policy    *DaemonPolicy `json:"policy,omitempty"`  // daemon only
 	ExpiresAt time.Time     `json:"expires_at"`
 	Used      bool          `json:"used"`
 	UsedAt    time.Time     `json:"used_at,omitempty"`
@@ -46,11 +47,12 @@ type DaemonPolicy struct {
 
 // TokenRequest is the input to Issue().
 type TokenRequest struct {
-	Role   string
-	Name   string
-	Target string
-	Policy *DaemonPolicy
-	TTL    time.Duration
+	Role    string
+	Name    string
+	Target  string   // single-target shorthand (compat); folded into Targets
+	Targets []string // all target daemons a bridge may reach
+	Policy  *DaemonPolicy
+	TTL     time.Duration
 }
 
 // TokenStore is the gateway-side enrollment-token registry.
@@ -82,8 +84,18 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 	if req.Name == "" {
 		return nil, errors.New("tokens: name required")
 	}
-	if req.Role == "bridge" && req.Target == "" {
-		return nil, errors.New("tokens: target daemon required for bridge tokens")
+	if req.Role == "bridge" {
+		// Fold the single-target shorthand into Targets, then require at
+		// least one. Target keeps the first entry for compat readers.
+		targets := req.Targets
+		if len(targets) == 0 && req.Target != "" {
+			targets = []string{req.Target}
+		}
+		if len(targets) == 0 {
+			return nil, errors.New("tokens: target daemon required for bridge tokens")
+		}
+		req.Targets = targets
+		req.Target = targets[0]
 	}
 	if req.TTL <= 0 {
 		req.TTL = 15 * time.Minute
@@ -97,6 +109,7 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 		Role:      req.Role,
 		Name:      req.Name,
 		Target:    req.Target,
+		Targets:   req.Targets,
 		Policy:    req.Policy,
 		ExpiresAt: time.Now().Add(req.TTL),
 	}
