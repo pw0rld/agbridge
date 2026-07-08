@@ -38,11 +38,16 @@ jobs:
           # so it runs on RHEL 8 / Anolis 3 / Aliyun Linux which ship
           # glibc 2.32 — github's ubuntu-latest runner is on glibc 2.35+.
           CGO_ENABLED: "0"
+          # Stamp the exact release tag into the binary so `agbridge
+          # --version` can never drift from the tag it was cut from
+          # (which is what the agbridge-cloud version guard compares).
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           out="agbridge-${GOOS}-${GOARCH}"
-          go build -trimpath -ldflags="-s -w" -o "${out}" ./cmd/agbridge
+          go build -trimpath -ldflags="-s -w -X main.agbridgeVersion=${TAG}" -o "${out}" ./cmd/agbridge
           ls -la "${out}"
           file "${out}" || true
+          ./"${out}" --version 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:
