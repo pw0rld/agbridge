@@ -114,6 +114,54 @@ func TestEnrollBridgeHappyAfterDaemon(t *testing.T) {
 	}
 }
 
+func TestEnrollBridgeMultiTarget(t *testing.T) {
+	srv, tokens, gs := newTestEnrollServer(t)
+	gs.Daemons = []state.DaemonEntry{
+		{Name: "lab01", DeviceID: "d1", NoisePub: "pub01"},
+		{Name: "lab02", DeviceID: "d2", NoisePub: "pub02"},
+	}
+	tok, _ := tokens.Issue(TokenRequest{Role: "bridge", Name: "laptop", Targets: []string{"lab01", "lab02"}, TTL: time.Hour})
+	body, _ := json.Marshal(EnrollRequest{Token: tok.Token, DevicePubkeyB64: "bridgePub"})
+	r := httptest.NewRequest("POST", "/v1/enroll", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.HandleEnroll(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+	var resp EnrollResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if len(resp.Targets) != 2 {
+		t.Fatalf("want 2 targets, got %+v", resp.Targets)
+	}
+	byName := map[string]string{}
+	for _, tg := range resp.Targets {
+		byName[tg.Name] = tg.DaemonPubkey
+	}
+	if byName["lab01"] != "pub01" || byName["lab02"] != "pub02" {
+		t.Fatalf("target pubkeys wrong: %+v", resp.Targets)
+	}
+	// Legacy fields mirror the first target.
+	if resp.TargetDaemon != resp.Targets[0].Name || resp.DaemonPubkey != resp.Targets[0].DaemonPubkey {
+		t.Fatalf("legacy fields not first target: %q/%q", resp.TargetDaemon, resp.DaemonPubkey)
+	}
+	if len(gs.Agents) != 1 || len(gs.Agents[0].AllowedDaemons) != 2 {
+		t.Fatalf("bridge AllowedDaemons not multi: %+v", gs.Agents)
+	}
+}
+
+func TestEnrollBridgeMultiTargetMissingOneIs409(t *testing.T) {
+	srv, tokens, gs := newTestEnrollServer(t)
+	gs.Daemons = []state.DaemonEntry{{Name: "lab01", DeviceID: "d1", NoisePub: "pub01"}}
+	tok, _ := tokens.Issue(TokenRequest{Role: "bridge", Name: "laptop", Targets: []string{"lab01", "lab02"}, TTL: time.Hour})
+	body, _ := json.Marshal(EnrollRequest{Token: tok.Token, DevicePubkeyB64: "bridgePub"})
+	r := httptest.NewRequest("POST", "/v1/enroll", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.HandleEnroll(w, r)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when one target unenrolled, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestEnrollRejectsBadToken(t *testing.T) {
 	srv, _, _ := newTestEnrollServer(t)
 	body, _ := json.Marshal(EnrollRequest{Token: "et_bogus", DevicePubkeyB64: "AAA="})

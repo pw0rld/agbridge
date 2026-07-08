@@ -49,9 +49,12 @@ type EnrollResponse struct {
 	CertPin    string `json:"cert_pin"`
 	E2EMode    string `json:"e2e_mode"`
 
-	// For bridges:
-	TargetDaemon string `json:"target_daemon,omitempty"`
-	DaemonPubkey string `json:"daemon_pubkey,omitempty"`
+	// For bridges. TargetDaemon/DaemonPubkey carry the first target for
+	// backward compatibility with pre-multi-target clients; Targets
+	// carries every authorized daemon and its Noise pubkey.
+	TargetDaemon string         `json:"target_daemon,omitempty"`
+	DaemonPubkey string         `json:"daemon_pubkey,omitempty"`
+	Targets      []EnrollTarget `json:"targets,omitempty"`
 
 	// For daemons:
 	ExecEnabled          bool     `json:"exec_enabled,omitempty"`
@@ -61,6 +64,13 @@ type EnrollResponse struct {
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`
+}
+
+// EnrollTarget binds one authorized daemon's name to its Noise pubkey,
+// so a multi-target bridge learns every target it may reach at enroll.
+type EnrollTarget struct {
+	Name         string `json:"name"`
+	DaemonPubkey string `json:"daemon_pubkey"`
 }
 
 // EnrollServer is the HTTP handler bundling state + token store + cert pin.
@@ -177,22 +187,28 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case "bridge":
-		var daemonPub string
-		for _, d := range s.State.Daemons {
-			if d.Name == tok.Target {
-				daemonPub = d.NoisePub
-				break
+		// Resolve every authorized target's Noise pubkey. Any target that
+		// isn't enrolled yet is a 409 — the bridge can't pin a key it
+		// can't learn.
+		for _, name := range tok.Targets {
+			var daemonPub string
+			for _, d := range s.State.Daemons {
+				if d.Name == name {
+					daemonPub = d.NoisePub
+					break
+				}
 			}
-		}
-		if daemonPub == "" {
-			http.Error(w, fmt.Sprintf("target daemon %q not yet enrolled", tok.Target), http.StatusConflict)
-			return
+			if daemonPub == "" {
+				http.Error(w, fmt.Sprintf("target daemon %q not yet enrolled", name), http.StatusConflict)
+				return
+			}
+			resp.Targets = append(resp.Targets, EnrollTarget{Name: name, DaemonPubkey: daemonPub})
 		}
 		entry := state.AgentEntry{
 			Name:           tok.Name,
 			DeviceID:       devID,
 			APIKeyHash:     apiHash,
-			AllowedDaemons: []string{tok.Target},
+			AllowedDaemons: append([]string(nil), tok.Targets...),
 		}
 		replaced := false
 		for i, a := range s.State.Agents {
@@ -205,8 +221,8 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		if !replaced {
 			s.State.Agents = append(s.State.Agents, entry)
 		}
-		resp.TargetDaemon = tok.Target
-		resp.DaemonPubkey = daemonPub
+		resp.TargetDaemon = resp.Targets[0].Name
+		resp.DaemonPubkey = resp.Targets[0].DaemonPubkey
 
 	default:
 		http.Error(w, "unknown role", http.StatusInternalServerError)
@@ -230,7 +246,7 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 			s.Live.AddAgent(config.AgentEntry{
 				Name:           tok.Name,
 				APIKeyHash:     apiHash,
-				AllowedDaemons: []string{tok.Target},
+				AllowedDaemons: append([]string(nil), tok.Targets...),
 			})
 		}
 	}
