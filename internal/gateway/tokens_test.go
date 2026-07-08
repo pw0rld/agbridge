@@ -7,6 +7,52 @@ import (
 	"time"
 )
 
+func TestIssueBridgeMultiTarget(t *testing.T) {
+	store, err := NewTokenStore(filepath.Join(t.TempDir(), "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := store.Issue(TokenRequest{Role: "bridge", Name: "laptop", Targets: []string{"lab01", "lab02"}})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	got, err := store.Consume(tok.Token)
+	if err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if len(got.Targets) != 2 || got.Targets[0] != "lab01" || got.Targets[1] != "lab02" {
+		t.Fatalf("targets lost: %v", got.Targets)
+	}
+	if got.Target != "lab01" {
+		t.Fatalf("Target compat field = %q, want lab01", got.Target)
+	}
+}
+
+func TestIssueBridgeSingleTargetNormalizes(t *testing.T) {
+	store, err := NewTokenStore(filepath.Join(t.TempDir(), "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := store.Issue(TokenRequest{Role: "bridge", Name: "laptop", Target: "lab01"})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	got, _ := store.Consume(tok.Token)
+	if len(got.Targets) != 1 || got.Targets[0] != "lab01" {
+		t.Fatalf("single target not normalized into Targets: %v", got.Targets)
+	}
+}
+
+func TestIssueBridgeNoTargetFails(t *testing.T) {
+	store, err := NewTokenStore(filepath.Join(t.TempDir(), "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Issue(TokenRequest{Role: "bridge", Name: "laptop"}); err == nil {
+		t.Fatal("expected error when bridge has no target")
+	}
+}
+
 func TestTokenIssueConsume(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewTokenStore(filepath.Join(dir, "tokens.json"))
