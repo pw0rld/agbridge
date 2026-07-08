@@ -240,6 +240,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 	statePath := filepath.Join(stateDir, "state.json")
 	switch role {
 	case "bridge":
+		knownDaemons, defaultTarget := buildKnownDaemons(enrollResp)
 		bs := &state.BridgeState{
 			Version:             state.CurrentVersion,
 			DeviceID:            enrollResp.DeviceID,
@@ -248,15 +249,9 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 			Gateway:             state.GatewayRef{URL: gwURL, CertPin: certPinForState(tlsMode, enrollResp.CertPin), TLSMode: tlsModeForState(tlsMode)},
 			BridgeStaticKeyPath: keyPath,
 			E2EMode:             enrollResp.E2EMode,
-			DefaultTarget:       enrollResp.TargetDaemon,
-			KnownDaemons: map[string]state.DaemonRef{
-				enrollResp.TargetDaemon: {
-					Pubkey:    enrollResp.DaemonPubkey,
-					PinSource: "control-plane",
-					FirstSeen: time.Now(),
-				},
-			},
-			EnrolledAt: time.Now(),
+			DefaultTarget:       defaultTarget,
+			KnownDaemons:        knownDaemons,
+			EnrolledAt:          time.Now(),
 		}
 		if err := state.SaveBridge(statePath, bs); err != nil {
 			report("save_state", false, err.Error(), time.Since(t0))
@@ -336,4 +331,28 @@ func hostnameOnly(addr string) string {
 		return addr[:i]
 	}
 	return addr
+}
+
+// buildKnownDaemons turns an enroll response into the local KnownDaemons
+// pin map plus the default target. A multi-target response populates one
+// DaemonRef per Targets entry; an older single-target response (Targets
+// empty) falls back to the legacy TargetDaemon/DaemonPubkey pair.
+func buildKnownDaemons(resp gateway.EnrollResponse) (map[string]state.DaemonRef, string) {
+	out := map[string]state.DaemonRef{}
+	if len(resp.Targets) > 0 {
+		for _, t := range resp.Targets {
+			out[t.Name] = state.DaemonRef{
+				Pubkey:    t.DaemonPubkey,
+				PinSource: "control-plane",
+				FirstSeen: time.Now(),
+			}
+		}
+		return out, resp.Targets[0].Name
+	}
+	out[resp.TargetDaemon] = state.DaemonRef{
+		Pubkey:    resp.DaemonPubkey,
+		PinSource: "control-plane",
+		FirstSeen: time.Now(),
+	}
+	return out, resp.TargetDaemon
 }
