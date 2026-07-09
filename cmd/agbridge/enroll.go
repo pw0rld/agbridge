@@ -27,11 +27,13 @@ import (
 
 func newEnrollCmd() *cobra.Command {
 	var (
-		gatewayURL string
-		token      string
-		stateDir   string
-		tlsMode    string
-		emitJSON   bool
+		gatewayURL  string
+		token       string
+		stateDir    string
+		tlsMode     string
+		serviceUser string
+		noService   bool
+		emitJSON    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "enroll",
@@ -43,13 +45,15 @@ func newEnrollCmd() *cobra.Command {
 			if stateDir == "" {
 				stateDir = defaultStateDir()
 			}
-			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, tlsMode, emitJSON, cmd.OutOrStderr(), cmd.OutOrStdout())
+			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, tlsMode, serviceUser, !noService, emitJSON, cmd.OutOrStderr(), cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().StringVar(&gatewayURL, "gateway", "", "gateway URL (e.g. wss://gw.example.com/)")
 	cmd.Flags().StringVar(&token, "token", "", "enrollment token (et_…)")
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "where to write state.json + keys (default ~/.config/agbridge/)")
 	cmd.Flags().StringVar(&tlsMode, "tls-mode", "pin", "gateway TLS mode: pin (origin cert pin) or webpki (system CA, Cloudflare-compatible)")
+	cmd.Flags().StringVar(&serviceUser, "service-user", "", "daemon-only, root install: OS user the daemon service runs as (default: auto-detect a non-root account)")
+	cmd.Flags().BoolVar(&noService, "no-start-service", false, "daemon-only: skip installing/starting the systemd service")
 	cmd.Flags().BoolVar(&emitJSON, "json", false, "emit machine-readable JSON result")
 	return cmd
 }
@@ -62,16 +66,21 @@ type enrollStep struct {
 }
 
 type enrollOutcome struct {
-	OK        bool         `json:"ok"`
-	Stage     string       `json:"stage,omitempty"` // failed stage name (only when !OK)
-	Error     string       `json:"error,omitempty"`
-	DeviceID  string       `json:"device_id,omitempty"`
-	Role      string       `json:"role,omitempty"`
-	StatePath string       `json:"state_path,omitempty"`
-	Steps     []enrollStep `json:"steps"`
+	OK           bool         `json:"ok"`
+	Stage        string       `json:"stage,omitempty"` // failed stage name (only when !OK)
+	Error        string       `json:"error,omitempty"`
+	DeviceID     string       `json:"device_id,omitempty"`
+	Role         string       `json:"role,omitempty"`
+	StatePath    string       `json:"state_path,omitempty"`
+	Service      string       `json:"service,omitempty"`       // installed unit name (daemon)
+	ServiceMode  string       `json:"service_mode,omitempty"`  // "system" | "user"
+	ServiceUser  string       `json:"service_user,omitempty"`  // system mode: the run-as account
+	ServiceOK    bool         `json:"service_ok,omitempty"`
+	ServiceError string       `json:"service_error,omitempty"`
+	Steps        []enrollStep `json:"steps"`
 }
 
-func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, emitJSON bool, stderr, stdout io.Writer) error {
+func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceUser string, startService bool, emitJSON bool, stderr, stdout io.Writer) error {
 	outcome := enrollOutcome{}
 
 	report := func(stage string, ok bool, msg string, dur time.Duration) {
@@ -286,6 +295,22 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 	outcome.DeviceID = enrollResp.DeviceID
 	outcome.Role = role
 	outcome.StatePath = statePath
+
+	// For daemons, install a systemd service so it survives logout/reboot
+	// (unless the operator opted out). Best-effort: a failure here doesn't
+	// fail enroll — we fall back to printing manual start instructions.
+	var svc daemonServiceResult
+	if role == "daemon" && startService {
+		svc = setupDaemonService(ctx, stateDir, serviceUser)
+		outcome.Service = svc.Name
+		outcome.ServiceMode = svc.Mode
+		outcome.ServiceUser = svc.ServiceUser
+		outcome.ServiceOK = svc.OK
+		if svc.Err != nil {
+			outcome.ServiceError = svc.Err.Error()
+		}
+	}
+
 	if emitJSON {
 		return json.NewEncoder(stdout).Encode(outcome)
 	}
@@ -300,7 +325,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode string, e
 		fmt.Fprintf(stdout, "✓ Enrolled as daemon %q\n", enrollResp.Name)
 		fmt.Fprintf(stdout, "✓ Gateway: %s\n", gwURL)
 		fmt.Fprintf(stdout, "✓ Config written to: %s\n\n", statePath)
-		fmt.Fprintf(stdout, "Next: start the daemon — agbridge daemon --state-dir %s\n", stateDir)
+		printDaemonServiceResult(stdout, stateDir, svc, startService)
 	}
 	return nil
 }
