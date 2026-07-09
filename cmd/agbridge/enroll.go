@@ -42,9 +42,10 @@ func newEnrollCmd() *cobra.Command {
 			if gatewayURL == "" || token == "" {
 				return fmt.Errorf("--gateway and --token both required")
 			}
-			if stateDir == "" {
-				stateDir = defaultStateDir()
-			}
+			// Leave stateDir empty when not given; runEnroll defaults it
+			// once the role + service user are known (a root-installed
+			// daemon service defaults its state under the service user's
+			// home, not root's).
 			return runEnroll(cmd.Context(), gatewayURL, token, stateDir, tlsMode, serviceUser, !noService, emitJSON, cmd.OutOrStderr(), cmd.OutOrStdout())
 		},
 	}
@@ -234,6 +235,23 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 	}
 	report("token_exchange", true, fmt.Sprintf("device_id=%s role=%s", enrollResp.DeviceID, role), time.Since(t0))
 
+	// Decide how the daemon service will be installed (and thus where
+	// state should live) BEFORE writing state: a root-installed system
+	// service runs as a non-root user and defaults its state under that
+	// user's home, not /root — which the service user can't traverse.
+	stateDirExplicit := stateDir != ""
+	var svcPlan daemonServicePlan
+	var svcPlanErr error
+	if role == "daemon" && startService {
+		svcPlan, svcPlanErr = planDaemonService(os.Geteuid(), serviceUser, stateDir, stateDirExplicit, osUserLookup{})
+		if svcPlanErr == nil && svcPlan.StateDir != "" {
+			stateDir = svcPlan.StateDir
+		}
+	}
+	if stateDir == "" {
+		stateDir = defaultStateDir()
+	}
+
 	// Stage 7: save state.json + key file
 	t0 = time.Now()
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -301,7 +319,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 	// fail enroll — we fall back to printing manual start instructions.
 	var svc daemonServiceResult
 	if role == "daemon" && startService {
-		svc = setupDaemonService(ctx, stateDir, serviceUser)
+		svc = installDaemonService(ctx, stateDir, svcPlan, svcPlanErr)
 		outcome.Service = svc.Name
 		outcome.ServiceMode = svc.Mode
 		outcome.ServiceUser = svc.ServiceUser

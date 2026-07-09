@@ -66,6 +66,40 @@ func resolveServiceUser(explicit string, lk userLookup) (*serviceUser, error) {
 	return nil, errors.New("could not detect a non-root service user; pass --service-user <name>")
 }
 
+// daemonServicePlan is the resolved intent for installing the daemon
+// service, computed BEFORE state is written so the state dir can be
+// placed where the service user can actually reach it (root's home is
+// 0700, so a system service running as another user must not keep its
+// state under /root).
+type daemonServicePlan struct {
+	System   bool         // true → system service (root); false → --user service
+	User     *serviceUser // system mode: the run-as account
+	StateDir string       // effective state dir to write + point the unit at
+}
+
+// planDaemonService decides how the daemon service will be installed and
+// where its state should live, given the enroll euid, the --service-user
+// flag, the requested state dir, and whether --state-dir was explicit.
+//
+// euid==0 → system service running as a resolved non-root user; when
+// --state-dir wasn't given, state defaults to that user's home (NOT
+// root's, which the service user couldn't traverse). Non-root → --user
+// service; state dir is left as-is.
+func planDaemonService(euid int, serviceUserFlag, stateDir string, stateDirExplicit bool, lk userLookup) (daemonServicePlan, error) {
+	if euid == 0 {
+		u, err := resolveServiceUser(serviceUserFlag, lk)
+		if err != nil {
+			return daemonServicePlan{System: true}, err
+		}
+		p := daemonServicePlan{System: true, User: u, StateDir: stateDir}
+		if !stateDirExplicit {
+			p.StateDir = filepath.Join(u.Home, ".config", "agbridge")
+		}
+		return p, nil
+	}
+	return daemonServicePlan{System: false, StateDir: stateDir}, nil
+}
+
 // osUserLookup is the production userLookup backed by os/user (pure-Go
 // /etc/passwd parser under CGO_ENABLED=0).
 type osUserLookup struct{}
@@ -167,16 +201,22 @@ func systemdQuoteArg(s string) string {
 	return `"` + s + `"`
 }
 
-// setupDaemonService installs and starts a systemd unit for the daemon.
-// Running as root installs a system service that runs as a detected
-// non-root user; otherwise it installs a --user service. It is
-// best-effort: on any failure it returns a result whose Err is set so
-// the caller can fall back to printing manual instructions.
-//
-// stateDir is the path already written by enroll; serviceUser is the
-// optional --service-user override (system mode only).
-func setupDaemonService(ctx context.Context, stateDir, serviceUser string) daemonServiceResult {
+// installDaemonService installs and starts a systemd unit for the daemon
+// according to a plan computed by planDaemonService. It is best-effort:
+// on any failure it returns a result whose Err is set so the caller can
+// fall back to printing manual instructions. planErr carries a failure
+// from planning (e.g. root with no resolvable service user).
+func installDaemonService(ctx context.Context, stateDir string, plan daemonServicePlan, planErr error) daemonServiceResult {
 	res := daemonServiceResult{Name: daemonSystemdServiceName}
+	if plan.System {
+		res.Mode = "system"
+	} else {
+		res.Mode = "user"
+	}
+	if planErr != nil {
+		res.Err = planErr
+		return res
+	}
 	if runtime.GOOS != "linux" {
 		res.Err = errors.New("systemd service install is only supported on Linux")
 		return res
@@ -199,17 +239,16 @@ func setupDaemonService(ctx context.Context, stateDir, serviceUser string) daemo
 		return res
 	}
 
-	if os.Geteuid() == 0 {
-		return setupSystemService(ctx, res, exe, stateDir, serviceUser)
+	if plan.System {
+		return setupSystemService(ctx, res, exe, stateDir, plan.User)
 	}
 	return setupUserService(ctx, res, exe, stateDir)
 }
 
-func setupSystemService(ctx context.Context, res daemonServiceResult, exe, stateDir, serviceUserFlag string) daemonServiceResult {
+func setupSystemService(ctx context.Context, res daemonServiceResult, exe, stateDir string, u *serviceUser) daemonServiceResult {
 	res.Mode = "system"
-	u, err := resolveServiceUser(serviceUserFlag, osUserLookup{})
-	if err != nil {
-		res.Err = err
+	if u == nil {
+		res.Err = errors.New("no service user resolved")
 		return res
 	}
 	res.ServiceUser = u.Name
@@ -218,8 +257,9 @@ func setupSystemService(ctx context.Context, res daemonServiceResult, exe, state
 		res.Err = err
 		return res
 	}
-	// The daemon runs as u; it must own its state dir + keys.
-	if err := chownRecursive(stateDir, u.UID, u.GID); err != nil {
+	// The daemon runs as u; it must own its state dir + keys, and be able
+	// to traverse any parent dirs we just created as root.
+	if err := chownStateTree(stateDir, u); err != nil {
 		res.Err = fmt.Errorf("chown %s to %s: %w", stateDir, u.Name, err)
 		return res
 	}
@@ -281,6 +321,27 @@ func chownRecursive(root string, uid, gid int) error {
 		}
 		return os.Chown(path, uid, gid)
 	})
+}
+
+// chownStateTree gives the service user ownership of the state dir (its
+// state.json + keys) and of any parent dirs *under the user's home* that
+// we may have created as root — otherwise a root-owned 0700 parent such
+// as ~/.config would block the service user from traversing to its
+// state. The user's home itself is never chowned.
+func chownStateTree(stateDir string, u *serviceUser) error {
+	if err := chownRecursive(stateDir, u.UID, u.GID); err != nil {
+		return err
+	}
+	if u.Home == "" {
+		return nil
+	}
+	prefix := strings.TrimRight(u.Home, "/") + "/"
+	for p := filepath.Dir(stateDir); strings.HasPrefix(p, prefix); p = filepath.Dir(p) {
+		if err := os.Chown(p, u.UID, u.GID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runSystemctl(ctx context.Context, args ...string) ([]byte, error) {
