@@ -155,3 +155,54 @@ func TestShellQuoteArg(t *testing.T) {
 		t.Fatalf("shellQuoteArg = %q, want %q", got, want)
 	}
 }
+
+func TestPlanDaemonServiceRootDefaultsStateToUserHome(t *testing.T) {
+	lk := fakeLookup{byNameMap: map[string]*serviceUser{"ubuntu": mkUser("ubuntu", 1000)}}
+	// root, --state-dir NOT given → state goes under the service user's home.
+	p, err := planDaemonService(0, "", "", false, lk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.System || p.User == nil || p.User.Name != "ubuntu" {
+		t.Fatalf("expected system mode as ubuntu, got %+v", p)
+	}
+	if p.StateDir != "/home/ubuntu/.config/agbridge" {
+		t.Fatalf("state dir = %q, want /home/ubuntu/.config/agbridge (NOT /root)", p.StateDir)
+	}
+}
+
+func TestPlanDaemonServiceRootKeepsExplicitStateDir(t *testing.T) {
+	lk := fakeLookup{byNameMap: map[string]*serviceUser{"ubuntu": mkUser("ubuntu", 1000)}}
+	p, err := planDaemonService(0, "", "/data/agb", true, lk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.StateDir != "/data/agb" {
+		t.Fatalf("explicit state dir overwritten: %q", p.StateDir)
+	}
+}
+
+func TestPlanDaemonServiceRootNoUserErrors(t *testing.T) {
+	lk := fakeLookup{byNameMap: map[string]*serviceUser{}, byUIDMap: map[int]*serviceUser{}}
+	p, err := planDaemonService(0, "", "", false, lk)
+	if err == nil {
+		t.Fatal("expected error when no service user resolvable")
+	}
+	if !p.System {
+		t.Fatalf("plan should still mark system mode, got %+v", p)
+	}
+}
+
+func TestPlanDaemonServiceNonRootIsUserMode(t *testing.T) {
+	lk := fakeLookup{}
+	p, err := planDaemonService(1000, "", "/home/me/.config/agbridge", true, lk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.System {
+		t.Fatalf("non-root should be user mode, got %+v", p)
+	}
+	if p.StateDir != "/home/me/.config/agbridge" {
+		t.Fatalf("user-mode state dir changed: %q", p.StateDir)
+	}
+}
