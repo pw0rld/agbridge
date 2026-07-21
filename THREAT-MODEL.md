@@ -100,9 +100,7 @@ The threat model **does not** assume:
 After the daemon process starts and validates its `state.json`, none
 of these fields can be mutated at runtime by any protocol message:
 
-- `allowed_read_paths`
-- `allowed_write_paths`
-- `allowed_exec_cwds`
+- `exec_enabled`
 - `allowed_bridge_pubkeys`
 - `forbidden_ports`
 - `env_allowlist`
