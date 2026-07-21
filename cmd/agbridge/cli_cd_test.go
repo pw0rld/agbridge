@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/state"
 )
 
 // TestPwdBootstrapsFromCaps verifies that pwd, run against a fresh bridge
@@ -37,6 +38,15 @@ func TestPwdBootstrapsFromCaps(t *testing.T) {
 	want := tmpDir + "\n"
 	if got := out.String(); got != want {
 		t.Fatalf("pwd = %q, want %q", got, want)
+	}
+
+	// Verify the working directory was persisted to state.json
+	st, err := state.LoadBridge(filepath.Join(g.stateDir, "state.json"))
+	if err != nil {
+		t.Fatalf("LoadBridge: %v", err)
+	}
+	if st.WorkingDir != tmpDir {
+		t.Fatalf("WorkingDir = %q, want %q", st.WorkingDir, tmpDir)
 	}
 }
 

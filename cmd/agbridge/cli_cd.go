@@ -100,7 +100,10 @@ func statIsDir(ctx context.Context, opts cliclient.Options, target string) error
 	if err != nil {
 		return err
 	}
-	rmap, _ := res.(map[string]any)
+	rmap, ok := res.(map[string]any)
+	if !ok {
+		return fmt.Errorf("stat %s: unexpected response shape", target)
+	}
 	if isErr, _ := rmap["isError"].(bool); isErr {
 		code, message := toolErrorFields(rmap)
 		return fmt.Errorf("%s: %s", code, message)
