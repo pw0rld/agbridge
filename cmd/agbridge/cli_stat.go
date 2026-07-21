@@ -36,6 +36,13 @@ func runStat(cmd *cobra.Command, path string, opts cliclient.Options) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
 
+	resolved, err := resolveArg(ctx, opts, path)
+	if err != nil {
+		printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+		return err
+	}
+	path = resolved
+
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
 		argsJSON, _ := json.Marshal(map[string]any{"path": path})
 		return c.Router().StatHandler(ctx, argsJSON)

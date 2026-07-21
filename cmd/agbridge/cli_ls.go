@@ -34,16 +34,20 @@ func newLsCmd() *cobra.Command {
 	var recursive bool
 	var depth int
 	cmd := &cobra.Command{
-		Use:   "ls <path>",
+		Use:   "ls [path]",
 		Short: "List directory entries on the daemon",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts, err := loadOpts()
 			if err != nil {
 				printErrorJSON(cmd.ErrOrStderr(), "state_unreadable", err.Error(), false)
 				return err
 			}
-			return runLs(cmd, args[0], recursive, depth, opts)
+			arg := ""
+			if len(args) == 1 {
+				arg = args[0]
+			}
+			return runLs(cmd, arg, recursive, depth, opts)
 		},
 	}
 	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "descend into subdirectories (client-side walk)")
@@ -56,6 +60,13 @@ func newLsCmd() *cobra.Command {
 func runLs(cmd *cobra.Command, root string, recursive bool, depth int, opts cliclient.Options) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
+
+	resolved, err := resolveArg(ctx, opts, root)
+	if err != nil {
+		printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+		return err
+	}
+	root = resolved
 
 	var walks []lsWalk
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {

@@ -39,6 +39,13 @@ func runGet(cmd *cobra.Command, remotePath, localPath string, opts cliclient.Opt
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
 
+	resolved, err := resolveArg(ctx, opts, remotePath)
+	if err != nil {
+		printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+		return err
+	}
+	remotePath = resolved
+
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
 		argsJSON, _ := json.Marshal(map[string]any{
 			"src_path":  remotePath,
