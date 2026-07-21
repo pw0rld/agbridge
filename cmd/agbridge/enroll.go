@@ -254,6 +254,11 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 
 	// Stage 7: save state.json + key file
 	t0 = time.Now()
+	if svcPlan.System && svcPlan.User != nil {
+		if err := ensureNoSymlinkBelowHome(stateDir, svcPlan.User.Home); err != nil {
+			return fmt.Errorf("enroll: unsafe state dir: %w", err)
+		}
+	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		report("save_state", false, err.Error(), time.Since(t0))
 		return fail("save_state", err)
