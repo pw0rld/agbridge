@@ -300,6 +300,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 			EnvAllowlist:         enrollResp.EnvAllowlist,
 			ForbiddenPorts:       enrollResp.ForbiddenPorts,
 			AllowedBridgePubkeys: enrollResp.AllowedBridgePubkeys,
+			DefaultWorkingDir:    enrollResp.DefaultWorkingDir,
 			EnrolledAt:           time.Now(),
 		}
 		if err := state.SaveDaemon(statePath, ds); err != nil {

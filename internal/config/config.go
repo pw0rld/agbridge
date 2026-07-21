@@ -62,6 +62,7 @@ type DaemonConfig struct {
 	AllowedReadPaths  []string `yaml:"allowed_read_paths"`
 	AllowedWritePaths []string `yaml:"allowed_write_paths"`
 	ForbiddenPorts    []int    `yaml:"forbidden_ports"`
+	DefaultWorkingDir string   `yaml:"default_working_dir"`
 
 	// E2E (v0.1.0+).
 	E2EMode              string   `yaml:"e2e_mode"`               // "disabled" | "optional" | "required"
