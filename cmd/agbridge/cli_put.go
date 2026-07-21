@@ -61,6 +61,13 @@ func runPut(cmd *cobra.Command, localPath, remotePath string, mode uint32, opts 
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
 
+	resolved, err := resolveArg(ctx, opts, remotePath)
+	if err != nil {
+		printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+		return err
+	}
+	remotePath = resolved
+
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
 		argsMap := map[string]any{
 			"source":     "local_path",

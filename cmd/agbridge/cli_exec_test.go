@@ -88,6 +88,37 @@ func TestExecJSONShape(t *testing.T) {
 	}
 }
 
+// TestExecDefaultsCwdToWorkingDir verifies that omitting --cwd falls
+// back to the CLI's bootstrapped working directory instead of leaving
+// cwd empty on the wire.
+func TestExecDefaultsCwdToWorkingDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		ExecEnabled:       true,
+		EnvAllowlist:      []string{"PATH"},
+		DefaultWorkingDir: tmpDir,
+	})
+	dir := writeFixtureState(t, env)
+	g.stateDir = dir
+	defer func() { g.stateDir = "" }()
+	opts := env.newCLIOpts()
+	g.timeout = 5 * time.Second
+	defer func() { g.timeout = 0 }()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd := newExecCmd()
+	cmd.SetOut(&stdoutBuf)
+	cmd.SetErr(&stderrBuf)
+	cmd.SetContext(env.ctx)
+
+	if err := runExec(cmd, []string{"/bin/pwd"}, "", nil, 5000, opts); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.Contains(stdoutBuf.String(), tmpDir) {
+		t.Errorf("stdout missing cwd %q: %q", tmpDir, stdoutBuf.String())
+	}
+}
+
 // TestSplitExecArgsRequiresCommand asserts the helper rejects empty
 // remote-cmd input. The cobra MinimumNArgs(1) check fires for the
 // fully-empty case, but splitExecArgs guards the

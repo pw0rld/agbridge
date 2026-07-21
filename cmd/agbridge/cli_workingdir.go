@@ -52,6 +52,21 @@ func ensureWorkingDir(ctx context.Context, opts cliclient.Options) (string, erro
 	return dwd, nil
 }
 
+// resolveArg resolves a user-supplied path argument against the working
+// directory. Absolute args need no cwd, so it skips the daemon round-trip
+// (and the state.json dependency) entirely; relative or empty args fetch
+// cwd via ensureWorkingDir first.
+func resolveArg(ctx context.Context, opts cliclient.Options, arg string) (string, error) {
+	if arg != "" && path.IsAbs(arg) {
+		return path.Clean(arg), nil
+	}
+	cwd, err := ensureWorkingDir(ctx, opts)
+	if err != nil {
+		return "", err
+	}
+	return resolveRemotePath(cwd, arg), nil
+}
+
 // setWorkingDir persists an explicit working directory (used by `cd`).
 func setWorkingDir(dir string) error {
 	p := stateJSONPath(g.stateDir)
