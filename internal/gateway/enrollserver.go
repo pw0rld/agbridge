@@ -64,6 +64,7 @@ type EnrollResponse struct {
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`
+	DefaultWorkingDir    string   `json:"default_working_dir,omitempty"`
 }
 
 // EnrollTarget binds one authorized daemon's name to its Noise pubkey,
@@ -184,6 +185,7 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.ForbiddenPorts = append([]int(nil), tok.Policy.ForbiddenPorts...)
 			resp.AllowedBridgePubkeys = append([]string(nil), tok.Policy.AllowedBridgePubkeys...)
+			resp.DefaultWorkingDir = tok.Policy.DefaultWorkingDir
 		}
 
 	case "bridge":

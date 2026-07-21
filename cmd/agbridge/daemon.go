@@ -119,6 +119,18 @@ func loadDaemonConfig(cfgPath, stateDir string) (*config.DaemonConfig, error) {
 	return config.LoadDaemon(cfgPath)
 }
 
+// effectiveDefaultWorkingDir resolves the daemon's advertised working dir:
+// the configured value if set, else the daemon user's home, else "/".
+func effectiveDefaultWorkingDir(cfg *config.DaemonConfig) string {
+	if cfg.DefaultWorkingDir != "" {
+		return cfg.DefaultWorkingDir
+	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return "/"
+}
+
 func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 	return &config.DaemonConfig{
 		GatewayURL:           s.Gateway.URL,
@@ -135,6 +147,7 @@ func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 		E2EMode:              s.E2EMode,
 		NoiseStaticKeyPath:   s.NoiseStaticKeyPath,
 		AllowedBridgePubkeys: s.AllowedBridgePubkeys,
+		DefaultWorkingDir:    s.DefaultWorkingDir,
 	}
 }
 
@@ -498,6 +511,7 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 		ForbiddenPorts:    append([]int(nil), s.cfg.ForbiddenPorts...),
 		MaxFileBytes:      maxFileBytes,
 		AgbridgeVersion:   agbridgeVersion,
+		DefaultWorkingDir: effectiveDefaultWorkingDir(s.cfg),
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})

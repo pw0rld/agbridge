@@ -37,6 +37,7 @@ type DaemonPolicy struct {
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`
+	DefaultWorkingDir    string   `json:"default_working_dir,omitempty"`
 	// Strict, when true, forces the daemon into e2e_mode=required and
 	// rejects bridges whose pubkey isn't in AllowedBridgePubkeys.
 	// Default (false) → e2e_mode=optional (Noise IK still negotiated,

@@ -17,6 +17,7 @@ type Capabilities struct {
 	ForbiddenPorts    []int    `json:"forbidden_ports,omitempty"`
 	MaxFileBytes      int64    `json:"max_file_bytes"`
 	AgbridgeVersion   string   `json:"agbridge_version,omitempty"`
+	DefaultWorkingDir string   `json:"default_working_dir,omitempty"`
 }
 
 func (c Capabilities) Encode() ([]byte, error) { return json.Marshal(c) }

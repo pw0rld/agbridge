@@ -65,6 +65,7 @@ type DaemonState struct {
 	AllowedWritePaths    []string   `json:"allowed_write_paths"`
 	ForbiddenPorts       []int      `json:"forbidden_ports"`
 	AllowedBridgePubkeys []string   `json:"allowed_bridge_pubkeys"`
+	DefaultWorkingDir    string     `json:"default_working_dir,omitempty"`
 	EnrolledAt           time.Time  `json:"enrolled_at"`
 }
 
