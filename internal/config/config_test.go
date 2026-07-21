@@ -112,40 +112,28 @@ gateway_url: wss://gw/
 daemon_name: lab01
 registration_token: tok
 cert_pin: sha256:abc
-allowed_exec_cwds:
-  - /home/user/projects/*
 env_allowlist:
   - PATH
   - HOME
   - LANG
-allowed_read_paths:
-  - /home/user/projects/*
-  - /tmp/*
-allowed_write_paths:
-  - /home/user/projects/*
 forbidden_ports:
   - 22
   - 2375
+default_working_dir: /srv/x
 `
 	p := writeTemp(t, yaml)
 	cfg, err := LoadDaemon(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(cfg.AllowedExecCwds) != 1 || cfg.AllowedExecCwds[0] != "/home/user/projects/*" {
-		t.Errorf("allowed_exec_cwds: %+v", cfg.AllowedExecCwds)
-	}
 	if len(cfg.EnvAllowlist) != 3 {
 		t.Errorf("env_allowlist: %+v", cfg.EnvAllowlist)
 	}
-	if len(cfg.AllowedReadPaths) != 2 || cfg.AllowedReadPaths[1] != "/tmp/*" {
-		t.Errorf("allowed_read_paths: %+v", cfg.AllowedReadPaths)
-	}
-	if len(cfg.AllowedWritePaths) != 1 {
-		t.Errorf("allowed_write_paths: %+v", cfg.AllowedWritePaths)
-	}
 	if len(cfg.ForbiddenPorts) != 2 || cfg.ForbiddenPorts[0] != 22 {
 		t.Errorf("forbidden_ports: %+v", cfg.ForbiddenPorts)
+	}
+	if cfg.DefaultWorkingDir != "/srv/x" {
+		t.Errorf("default_working_dir: %+v", cfg.DefaultWorkingDir)
 	}
 }
 

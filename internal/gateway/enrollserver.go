@@ -7,31 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
 	"github.com/pw0rld/agbridge/internal/state"
 )
-
-// expandPathShorthand emits both the directory itself and its "/*"
-// descendant glob for each entry, matching sandbox.PathAllowed semantics.
-// Entries already ending in "/*" pass through unchanged.
-func expandPathShorthand(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(paths)*2)
-	for _, p := range paths {
-		if strings.HasSuffix(p, "/*") {
-			out = append(out, p)
-			continue
-		}
-		out = append(out, p, p+"/*")
-	}
-	return out
-}
 
 // EnrollRequest is the device-side payload posted to /v1/enroll.
 type EnrollRequest struct {
@@ -58,9 +39,6 @@ type EnrollResponse struct {
 
 	// For daemons:
 	ExecEnabled          bool     `json:"exec_enabled,omitempty"`
-	AllowedExecCwds      []string `json:"allowed_exec_cwds,omitempty"`
-	AllowedReadPaths     []string `json:"allowed_read_paths,omitempty"`
-	AllowedWritePaths    []string `json:"allowed_write_paths,omitempty"`
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`
@@ -163,22 +141,6 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 		if tok.Policy != nil {
 			resp.ExecEnabled = tok.Policy.ExecEnabled
-			paths := expandPathShorthand(tok.Policy.AllowedPaths)
-			if len(tok.Policy.AllowedExecCwds) == 0 {
-				resp.AllowedExecCwds = append([]string(nil), paths...)
-			} else {
-				resp.AllowedExecCwds = append([]string(nil), tok.Policy.AllowedExecCwds...)
-			}
-			if len(tok.Policy.AllowedReadPaths) == 0 {
-				resp.AllowedReadPaths = append([]string(nil), paths...)
-			} else {
-				resp.AllowedReadPaths = append([]string(nil), tok.Policy.AllowedReadPaths...)
-			}
-			if len(tok.Policy.AllowedWritePaths) == 0 {
-				resp.AllowedWritePaths = append([]string(nil), paths...)
-			} else {
-				resp.AllowedWritePaths = append([]string(nil), tok.Policy.AllowedWritePaths...)
-			}
 			resp.EnvAllowlist = append([]string(nil), tok.Policy.EnvAllowlist...)
 			if len(resp.EnvAllowlist) == 0 {
 				resp.EnvAllowlist = []string{"PATH", "HOME", "LANG"}

@@ -24,7 +24,7 @@ func TestEditLiveAgainstFixture(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedWritePaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -63,7 +63,7 @@ func TestEditReplaceAll(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedWritePaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

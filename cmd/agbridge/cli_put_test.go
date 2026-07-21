@@ -28,7 +28,7 @@ func TestPutLiveAgainstFixture(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedWritePaths: []string{dstDir, dstDir + "/*"},
+		DefaultWorkingDir: dstDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

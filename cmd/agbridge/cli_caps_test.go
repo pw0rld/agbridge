@@ -15,10 +15,9 @@ import (
 // the same way as in the real binary.
 func TestCapsLiveAgainstFixture(t *testing.T) {
 	env := setupPhase4(t, &config.DaemonConfig{
-		DaemonName:       "lab01",
-		AllowedExecCwds:  []string{"/tmp", "/tmp/*"},
-		AllowedReadPaths: []string{"/etc", "/etc/*"},
-		EnvAllowlist:     []string{"PATH", "HOME"},
+		DaemonName:        "lab01",
+		DefaultWorkingDir: "/tmp",
+		EnvAllowlist:      []string{"PATH", "HOME"},
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -32,7 +31,7 @@ func TestCapsLiveAgainstFixture(t *testing.T) {
 		t.Fatalf("caps: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"daemon_name:", "lab01", "allowed_exec_cwds", "/tmp"} {
+	for _, want := range []string{"daemon_name:", "lab01", "default_working_dir", "/tmp"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q:\n%s", want, got)
 		}

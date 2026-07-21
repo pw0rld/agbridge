@@ -59,10 +59,7 @@ type DaemonState struct {
 	NoiseStaticKeyPath   string     `json:"noise_static_key_path"`
 	E2EMode              string     `json:"e2e_mode"`
 	ExecEnabled          bool       `json:"exec_enabled"`
-	AllowedExecCwds      []string   `json:"allowed_exec_cwds"`
 	EnvAllowlist         []string   `json:"env_allowlist"`
-	AllowedReadPaths     []string   `json:"allowed_read_paths"`
-	AllowedWritePaths    []string   `json:"allowed_write_paths"`
 	ForbiddenPorts       []int      `json:"forbidden_ports"`
 	AllowedBridgePubkeys []string   `json:"allowed_bridge_pubkeys"`
 	DefaultWorkingDir    string     `json:"default_working_dir,omitempty"`

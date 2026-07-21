@@ -28,7 +28,7 @@ func TestGetLiveAgainstFixture(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedReadPaths: []string{srcDir, srcDir + "/*"},
+		DefaultWorkingDir: srcDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

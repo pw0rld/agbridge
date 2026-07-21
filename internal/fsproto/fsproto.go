@@ -1,6 +1,6 @@
 // Package fsproto defines payload schemas for the filesystem
-// introspection tools: list_directory and stat. Both honor the daemon's
-// allowed_read_paths since the responses leak filesystem metadata.
+// introspection tools: list_directory and stat. Both leak filesystem
+// metadata in their responses.
 package fsproto
 
 import "encoding/json"
