@@ -15,10 +15,10 @@ import (
 //
 // The invariants:
 //
-//   I1. Daemon's ACL state (allowed_read_paths, allowed_write_paths,
-//       allowed_exec_cwds, allowed_bridge_pubkeys, forbidden_ports)
-//       loads at boot from local state.json. No frame type can mutate
-//       it. Tested by: TestDaemonDispatchHasNoConfigMutationCase.
+//   I1. Daemon's ACL state (exec_enabled, allowed_bridge_pubkeys,
+//       forbidden_ports) loads at boot from local state.json. No
+//       frame type can mutate it. Tested by:
+//       TestDaemonDispatchHasNoConfigMutationCase.
 //
 //   I2. The daemon refuses Noise handshakes from any bridge whose
 //       pubkey is not in allowed_bridge_pubkeys (when e2e_mode=
