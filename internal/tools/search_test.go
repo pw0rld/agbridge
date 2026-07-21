@@ -32,8 +32,7 @@ func setupSearchFixture(t *testing.T) string {
 
 func TestSearchHappyPath(t *testing.T) {
 	dir := setupSearchFixture(t)
-	allow := []string{dir + "/*", dir}
-	resp := Search(searchproto.SearchRequest{Pattern: "Foo", Path: dir, Regex: true}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "Foo", Path: dir, Regex: true})
 	if resp.Err != "" {
 		t.Fatalf("err: %q (%s)", resp.Err, resp.ErrDetail)
 	}
@@ -54,8 +53,7 @@ func TestSearchHappyPath(t *testing.T) {
 
 func TestSearchLineColumnSnippet(t *testing.T) {
 	dir := setupSearchFixture(t)
-	allow := []string{dir + "/*", dir}
-	resp := Search(searchproto.SearchRequest{Pattern: "Bar", Path: dir, Regex: true}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "Bar", Path: dir, Regex: true})
 	if len(resp.Results) != 1 {
 		t.Fatalf("expected 1 result for Bar, got %d", len(resp.Results))
 	}
@@ -76,9 +74,8 @@ func TestSearchLineColumnSnippet(t *testing.T) {
 
 func TestSearchCaseInsensitive(t *testing.T) {
 	dir := setupSearchFixture(t)
-	allow := []string{dir + "/*", dir}
 	resp := Search(searchproto.SearchRequest{
-		Pattern: "foo", Path: dir, Regex: true, CaseInsensitive: true}, allow)
+		Pattern: "foo", Path: dir, Regex: true, CaseInsensitive: true})
 	if resp.TotalMatched < 2 {
 		t.Errorf("case insensitive should match Foo (capital): got %d", resp.TotalMatched)
 	}
@@ -88,38 +85,33 @@ func TestSearchLiteralVsRegex(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "f.txt"),
 		[]byte("text with a.b.c and abc\n"), 0o644)
-	allow := []string{dir + "/*", dir}
 
 	// Literal mode: . is just a dot
-	resp := Search(searchproto.SearchRequest{Pattern: "a.b.c", Path: dir, Regex: false}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "a.b.c", Path: dir, Regex: false})
 	if resp.TotalMatched != 1 {
 		t.Errorf("literal a.b.c should match once: %d", resp.TotalMatched)
 	}
 
 	// Regex mode: . matches any char so a.b.c also matches abc... but only on its own line
 	// Actually a.b.c in regex means "a, any, b, any, c" so should also match "a.b.c"
-	resp = Search(searchproto.SearchRequest{Pattern: "a.b.c", Path: dir, Regex: true}, allow)
+	resp = Search(searchproto.SearchRequest{Pattern: "a.b.c", Path: dir, Regex: true})
 	if resp.TotalMatched < 1 {
 		t.Errorf("regex a.b.c should match at least once: %d", resp.TotalMatched)
 	}
 }
 
-func TestSearchPathForbidden(t *testing.T) {
+func TestSearchNoPathGate(t *testing.T) {
 	dir := t.TempDir()
-	allowlist := []string{"/different/x"}
-	resp := Search(searchproto.SearchRequest{Pattern: "x", Path: dir, Regex: true}, allowlist)
-	if resp.Err != "path_forbidden" {
-		t.Errorf("err: %q", resp.Err)
-	}
-	if !strings.Contains(resp.ErrDetail, "/different/x") {
-		t.Errorf("ErrDetail missing allowlist: %q", resp.ErrDetail)
+	_ = os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644)
+	resp := Search(searchproto.SearchRequest{Pattern: "x", Path: dir, Regex: true})
+	if resp.Err != "" {
+		t.Errorf("unexpected err: %q (%s)", resp.Err, resp.ErrDetail)
 	}
 }
 
 func TestSearchBadPattern(t *testing.T) {
 	dir := t.TempDir()
-	allow := []string{dir + "/*", dir}
-	resp := Search(searchproto.SearchRequest{Pattern: "[unclosed", Path: dir, Regex: true}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "[unclosed", Path: dir, Regex: true})
 	if resp.Err != "bad_pattern" {
 		t.Errorf("err: %q", resp.Err)
 	}
@@ -129,9 +121,8 @@ func TestSearchMaxResultsCap(t *testing.T) {
 	dir := t.TempDir()
 	body := strings.Repeat("hit\n", 50) // 50 hits
 	_ = os.WriteFile(filepath.Join(dir, "many.txt"), []byte(body), 0o644)
-	allow := []string{dir + "/*", dir}
 
-	resp := Search(searchproto.SearchRequest{Pattern: "hit", Path: dir, Regex: true, MaxResults: 10}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "hit", Path: dir, Regex: true, MaxResults: 10})
 	if len(resp.Results) != 10 {
 		t.Errorf("expected 10 results, got %d", len(resp.Results))
 	}
@@ -149,8 +140,7 @@ func TestSearchSkipsBinaryFile(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "bin"),
 		[]byte{0, 1, 'm', 'a', 't', 'c', 'h', 0, 0}, 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "txt"), []byte("match here\n"), 0o644)
-	allow := []string{dir + "/*", dir}
-	resp := Search(searchproto.SearchRequest{Pattern: "match", Path: dir, Regex: true}, allow)
+	resp := Search(searchproto.SearchRequest{Pattern: "match", Path: dir, Regex: true})
 	for _, m := range resp.Results {
 		if strings.HasSuffix(m.File, "bin") {
 			t.Errorf("binary file should be skipped, got match: %+v", m)
@@ -163,9 +153,8 @@ func TestSearchSkipsBinaryFile(t *testing.T) {
 
 func TestSearchGlobFilter(t *testing.T) {
 	dir := setupSearchFixture(t)
-	allow := []string{dir + "/*", dir}
 	resp := Search(searchproto.SearchRequest{
-		Pattern: "package", Path: dir, Regex: true, Glob: "*.go"}, allow)
+		Pattern: "package", Path: dir, Regex: true, Glob: "*.go"})
 	for _, m := range resp.Results {
 		if !strings.HasSuffix(m.File, ".go") {
 			t.Errorf("glob *.go should only match .go files, got %s", m.File)

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // ChunkSource yields successive FileChunk frames. WriteFile loops until it
@@ -17,20 +16,14 @@ import (
 type ChunkSource func() (fileproto.FileChunk, error)
 
 // WriteFile receives chunks via nextChunk and writes them to a temp file in
-// the same directory as req.Path, then renames into place. allowedPaths is the
-// daemon-side allowlist; maxBytes caps total bytes received.
+// the same directory as req.Path, then renames into place. maxBytes caps
+// total bytes received.
 //
 // Returns FileComplete with Err set on user-visible failures
-// (path_forbidden, exceeds_max_size, write_failed, source_error). The target
+// (exceeds_max_size, write_failed, source_error). The target
 // file is never partially overwritten — failures leave the original (if any)
 // in place.
-func WriteFile(ctx context.Context, req fileproto.FileWriteRequest, allowedPaths []string, maxBytes int64, nextChunk ChunkSource) (fileproto.FileComplete, error) {
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return fileproto.FileComplete{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}, nil
-	}
+func WriteFile(ctx context.Context, req fileproto.FileWriteRequest, maxBytes int64, nextChunk ChunkSource) (fileproto.FileComplete, error) {
 	mode := os.FileMode(req.Mode)
 	if mode == 0 {
 		mode = 0o644

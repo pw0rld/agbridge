@@ -16,11 +16,10 @@ func TestEditFileHappyPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "main.go")
 	_ = os.WriteFile(path, []byte("package x\n\nfunc Old() {}\n"), 0o644)
-	allow := []string{dir + "/*"}
 
 	complete, err := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "func Old()", NewString: "func New()"},
-		allow, 1<<20)
+		1<<20)
 	if err != nil {
 		t.Fatalf("EditFile: %v", err)
 	}
@@ -35,33 +34,23 @@ func TestEditFileHappyPath(t *testing.T) {
 
 func TestEditFileNotFound(t *testing.T) {
 	dir := t.TempDir()
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: filepath.Join(dir, "nope.txt"), OldString: "a", NewString: "b"},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "not_found" {
 		t.Errorf("expected not_found, got %q", complete.Err)
 	}
 }
 
-func TestEditFilePathForbidden(t *testing.T) {
+func TestEditFileNoPathGate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.txt")
 	_ = os.WriteFile(path, []byte("x"), 0o644)
-	allowlist := []string{"/different/a", "/different/b/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "x", NewString: "y"},
-		allowlist, 1<<20)
-	if complete.Err != "path_forbidden" {
-		t.Errorf("err: %q", complete.Err)
-	}
-	if complete.ErrDetail == "" {
-		t.Fatal("ErrDetail required")
-	}
-	for _, want := range allowlist {
-		if !strings.Contains(complete.ErrDetail, want) {
-			t.Errorf("ErrDetail missing %q: %s", want, complete.ErrDetail)
-		}
+		1<<20)
+	if complete.Err != "" {
+		t.Errorf("unexpected err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
 }
 
@@ -69,10 +58,9 @@ func TestEditFileOldStringNotPresent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("hello world"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "absent", NewString: "x"},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "old_string_not_found" {
 		t.Errorf("expected old_string_not_found, got %q", complete.Err)
 	}
@@ -87,10 +75,9 @@ func TestEditFileAmbiguousWithoutReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("foo\nfoo\n"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "foo", NewString: "bar"},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "ambiguous_match" {
 		t.Errorf("expected ambiguous_match, got %q (%s)", complete.Err, complete.ErrDetail)
 	}
@@ -127,11 +114,10 @@ func TestEditFileWritesBackup(t *testing.T) {
 	path := filepath.Join(dir, "orig.txt")
 	orig := []byte("original content here\n")
 	_ = os.WriteFile(path, orig, 0o644)
-	allow := []string{dir + "/*"}
 
 	complete, err := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "original", NewString: "MODIFIED"},
-		allow, 1<<20)
+		1<<20)
 	if err != nil {
 		t.Fatalf("EditFile: %v", err)
 	}
@@ -163,14 +149,13 @@ func TestEditFileBackupGCKeepsOnlyN(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trace.txt")
 	_ = os.WriteFile(path, []byte("v0"), 0o644)
-	allow := []string{dir + "/*"}
 
 	for i := 0; i < 10; i++ {
 		old := fmt.Sprintf("v%d", i)
 		nw := fmt.Sprintf("v%d", i+1)
 		complete, err := EditFile(context.Background(),
 			fileproto.FileEditRequest{Path: path, OldString: old, NewString: nw},
-			allow, 1<<20)
+			1<<20)
 		if err != nil {
 			t.Fatalf("edit %d: %v", i, err)
 		}
@@ -199,14 +184,13 @@ func TestEditFileBackupGCKeepsNewest(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("step-0"), 0o644)
-	allow := []string{dir + "/*"}
 
 	for i := 0; i < 8; i++ {
 		old := fmt.Sprintf("step-%d", i)
 		nw := fmt.Sprintf("step-%d", i+1)
 		_, err := EditFile(context.Background(),
 			fileproto.FileEditRequest{Path: path, OldString: old, NewString: nw},
-			allow, 1<<20)
+			1<<20)
 		if err != nil {
 			t.Fatalf("edit %d: %v", i, err)
 		}
@@ -238,16 +222,15 @@ func TestEditFileBackupGCKeepsNewest(t *testing.T) {
 }
 
 func TestEditFileBackupNotCreatedOnPreCheckErrors(t *testing.T) {
-	// If the edit fails its pre-checks (path_forbidden / not_found /
+	// If the edit fails its pre-checks (not_found /
 	// old_string_not_found / ambiguous_match / etc.), no backup should
 	// be written and BackupPath should be empty.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("hello"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "absent", NewString: "x"},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "old_string_not_found" {
 		t.Fatalf("expected old_string_not_found, got %q", complete.Err)
 	}
@@ -264,10 +247,9 @@ func TestEditFileReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("foo\nfoo\nfoo\n"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "foo", NewString: "bar", ReplaceAll: true},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "" {
 		t.Fatalf("unexpected err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
@@ -281,10 +263,9 @@ func TestEditFileEmptyOldString(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("anything"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "", NewString: "x"},
-		allow, 1<<20)
+		1<<20)
 	if complete.Err != "bad_payload" {
 		t.Errorf("empty old_string should be bad_payload, got %q", complete.Err)
 	}
@@ -294,10 +275,9 @@ func TestEditFileExceedsMaxSize(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "huge")
 	_ = os.WriteFile(path, make([]byte, 100), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "x", NewString: "y"},
-		allow, 10) // cap=10, file=100
+		10) // cap=10, file=100
 	if complete.Err != "exceeds_max_size" {
 		t.Errorf("expected exceeds_max_size, got %q", complete.Err)
 	}
@@ -311,10 +291,9 @@ func TestEditFileAtomicOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("orig"), 0o644)
-	allow := []string{dir + "/*"}
 	_, _ = EditFile(context.Background(),
 		fileproto.FileEditRequest{Path: path, OldString: "absent", NewString: "x"},
-		allow, 1<<20)
+		1<<20)
 	got, _ := os.ReadFile(path)
 	if string(got) != "orig" {
 		t.Errorf("file should be untouched on old_string_not_found, got %q", got)
