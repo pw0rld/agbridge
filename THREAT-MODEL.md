@@ -52,12 +52,9 @@ your deployment, the rest of the model breaks.
   `state.json` can grant themselves anything; that's outside the
   threat model because at that point they already own the box.
 
-- **`allowed_read_paths` / `allowed_write_paths` / `allowed_exec_cwds`
-  root directories are operator-controlled.** If you list
-  `/home/$USER/projects/*` and let an untrusted process write
-  arbitrary files into `/home/$USER/projects/`, the protection
-  reduces to "what the daemon UID can read" — which is still
-  meaningful but weaker than the lexical allowlist implies.
+- **There is no path allowlist.** The daemon's file and exec operations
+  are bounded only by what the daemon's OS user can read/write/execute.
+  See I6.
 
 - **Noise static keys are generated locally and not shared.** The
   daemon's noise key is never transmitted; it's read from
@@ -158,69 +155,31 @@ complete the handshake without owning a noise private key whose
 public form is in the daemon's `allowed_bridge_pubkeys`. The
 allowlist is set at boot from local config — see I1.
 
-### I6. Path allowlist resists `..` traversal AND symlink escape
+### I6. No path scoping — containment is the non-root user + isolation
 
-The path enforcement layer (`internal/sandbox/sandbox.go`) rejects
-every path that, after canonicalization and symlink resolution,
-isn't inside any allowlist entry.
+As of v0.0.4 the daemon does NOT scope file or exec operations to any path
+allowlist. The earlier read/write/exec-cwd allowlists were removed: once
+`exec_enabled` is on (the primary "trusted agent" use case), a path
+allowlist is trivially bypassed by running a subprocess, so it added
+complexity and friction without being a security boundary.
 
-Two checks happen, both must pass:
+**What contains a compromised or misused session:**
+- The daemon runs as a **non-root** OS user (enforced by `RefuseRoot`).
+  File and exec operations are bounded by that user's ordinary OS
+  permissions — the blast radius, not a path fence.
+- **Strong isolation is the operator's responsibility.** Run the daemon in
+  a container or VM if the workload warrants it. agbridge does not sandbox
+  the daemon for you.
+- Every operation is audited (cloud-side, out of scope for this file).
 
-1. **Lexical** (`PathAllowed`). `filepath.Clean` removes `..`
-   segments. Prefix match against allowlist requires the trailing
-   `/` (so `/tmp` doesn't match `/tmpfoo`).
-2. **Resolved** (`PathAllowedResolved`). Walks up the path to the
-   deepest existing ancestor, calls `filepath.EvalSymlinks` on it,
-   re-attaches any non-existent tail (writefile case), and re-runs
-   the lexical check against the resolved result.
-
-Without the resolved check, an attacker with write access to a
-directory inside the allowlist could plant a symlink to `/etc/passwd`
-and read it. The resolved check closes that gap.
-
-**Code path proof.** Every handler that takes a path field passes
-it through `PathAllowedResolved` before any filesystem operation.
-Migrated call sites: `bgexec.go:152`, `editfile.go:78`, `exec.go:36`,
-`fs.go:19`, `fs.go:58`, `readfile.go:53`, `search.go:65`,
-`upload.go:33`, `upload.go:84`, `writefile.go:28`.
-
-**Tests pin this.**
-- `internal/sandbox/symlink_test.go` (7 unit tests):
-  - `TestPathAllowedResolvedRejectsSymlinkEscape`
-  - `TestPathAllowedResolvedRejectsAncestorSymlink`
-  - `TestPathAllowedResolvedAcceptsInsideSymlink`
-  - `TestPathAllowedResolvedHandlesNonExistentLeaf`
-  - `TestPathAllowedResolvedPreservesDotDotRejection`
-  - `TestPathAllowedResolvedRejectsRelativePath`
-  - `TestPathAllowedResolvedEmptyAllowlist`
-- `internal/tools/symlink_escape_test.go` (5 handler-level tests):
-  - `TestReadFileRejectsSymlinkEscape`
-  - `TestWriteFileRejectsSymlinkEscape` (also verifies chunk source
-    isn't called after rejection)
-  - `TestListDirRejectsSymlinkEscapeViaParent`
-  - `TestStatRejectsSymlinkEscape`
-  - `TestSearchRejectsSymlinkEscape`
+The CLI-side **working directory** (`agbridge cd` / `pwd`, relative-path
+resolution) is a convenience default for where the AI operates. It is NOT a
+security control: absolute paths and `..` reach anywhere the daemon user
+can, by design.
 
 ---
 
 ## Known limitations (we don't pretend to defend against these)
-
-- **TOCTOU on path resolution.** `PathAllowedResolved` resolves
-  symlinks at check time. An attacker with write access to the
-  allowlist root can race between the check and the actual open
-  by replacing a path component with a symlink. The window is
-  short, and the daemon runs as a non-root user (so even a winning
-  race is bounded by the user's filesystem permissions). Linux-only
-  callers needing stronger guarantees should use `openat2` with
-  `RESOLVE_NO_SYMLINKS`; that's a future improvement (no fixed date).
-
-- **`ListDirectory` and `Stat` follow symlinks for entries inside the
-  directory.** This is by design — users expect to see what's in a
-  directory, including legitimate symlinks. The *path to the
-  directory itself* is checked with `PathAllowedResolved`. Entries
-  within it that happen to be symlinks pointing outside the
-  allowlist are visible in metadata but cannot be opened (the
-  open-side check rejects them).
 
 - **No per-frame rate limiting.** A malicious bridge can flood the
   daemon with file/exec requests. This exhausts CPU/IO but cannot
@@ -258,13 +217,13 @@ Migrated call sites: `bgexec.go:152`, `editfile.go:78`, `exec.go:36`,
 If you're adding a new feature that touches:
 
 - The dispatch table in `cmd/agbridge/daemon.go:dispatch`
-- The path-allowlist plumbing
+- `sandbox.RefuseRoot` or the CLI-side working-directory resolver
+  (`cmd/agbridge/cli_workingdir.go`)
 - The Noise handshake / peer authentication
 - Any field on `daemonState` or `daemonE2EDeps`
 
 ...you should also update this document. Run the tests under
-`cmd/agbridge/zero_trust_test.go`, `internal/sandbox/symlink_test.go`,
-and `internal/tools/symlink_escape_test.go` — they're the
-load-bearing evidence behind the invariants above. If a new feature
-breaks one of them, the right move is usually to rethink the feature,
-not to weaken the test.
+`cmd/agbridge/zero_trust_test.go` and `internal/sandbox/sandbox_test.go` —
+they're the load-bearing evidence behind the invariants above. If a new
+feature breaks one of them, the right move is usually to rethink the
+feature, not to weaken the test.
