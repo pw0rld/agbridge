@@ -28,7 +28,7 @@ func TestLsLiveAgainstFixture(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedReadPaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -62,7 +62,7 @@ func TestLsRecursive(t *testing.T) {
 	}
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedReadPaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

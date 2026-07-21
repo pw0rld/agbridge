@@ -30,10 +30,6 @@ type Token struct {
 // Daemon enroll request cannot widen these (v0.2 may add shrinking).
 type DaemonPolicy struct {
 	ExecEnabled          bool     `json:"exec_enabled,omitempty"`
-	AllowedExecCwds      []string `json:"allowed_exec_cwds,omitempty"`
-	AllowedReadPaths     []string `json:"allowed_read_paths,omitempty"`
-	AllowedWritePaths    []string `json:"allowed_write_paths,omitempty"`
-	AllowedPaths         []string `json:"allowed_paths,omitempty"` // shorthand → applied to all three when specifics are empty
 	EnvAllowlist         []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts       []int    `json:"forbidden_ports,omitempty"`
 	AllowedBridgePubkeys []string `json:"allowed_bridge_pubkeys,omitempty"`

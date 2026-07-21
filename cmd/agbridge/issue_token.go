@@ -18,24 +18,24 @@ import (
 // to the device operator as a paste-command.
 func newIssueTokenCmd() *cobra.Command {
 	var (
-		cfgPath        string
-		role           string
-		name           string
-		targets        []string
-		execEnabled    bool
-		allowedPaths   []string
-		forbiddenPorts []int
-		ttlMinutes     int
-		emitJSON       bool
+		cfgPath           string
+		role              string
+		name              string
+		targets           []string
+		execEnabled       bool
+		defaultWorkingDir string
+		forbiddenPorts    []int
+		ttlMinutes        int
+		emitJSON          bool
 	)
 	cmd := &cobra.Command{
 		Use:   "issue-token",
 		Short: "Issue a one-shot enrollment token for a bridge or daemon",
 		Long: `issue-token mints a short-lived (default 15min, one-time-use) token
 that a device operator pastes alongside agbridge enroll. For daemon
-tokens, --allowed-paths and --forbidden-ports are baked into the token;
-the daemon receives them from the gateway at enroll time and cannot
-widen the policy on its end.`,
+tokens, --default-working-dir and --forbidden-ports are baked into the
+token; the daemon receives them from the gateway at enroll time and
+cannot widen the policy on its end.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if role != "bridge" && role != "daemon" {
 				return fmt.Errorf("--role must be bridge or daemon")
@@ -62,9 +62,9 @@ widen the policy on its end.`,
 			req := gateway.TokenRequest{Role: role, Name: name, Targets: targets, TTL: ttl}
 			if role == "daemon" {
 				req.Policy = &gateway.DaemonPolicy{
-					ExecEnabled:    execEnabled,
-					AllowedPaths:   allowedPaths,
-					ForbiddenPorts: forbiddenPorts,
+					ExecEnabled:       execEnabled,
+					DefaultWorkingDir: defaultWorkingDir,
+					ForbiddenPorts:    forbiddenPorts,
 				}
 			}
 			tok, err := store.Issue(req)
@@ -79,11 +79,11 @@ widen the policy on its end.`,
 
 			if emitJSON {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-					"token":       tok.Token,
-					"gateway":     publicURL,
-					"expires_at":  tok.ExpiresAt,
-					"role":        role,
-					"name":        name,
+					"token":         tok.Token,
+					"gateway":       publicURL,
+					"expires_at":    tok.ExpiresAt,
+					"role":          role,
+					"name":          name,
 					"paste_command": pasteCommand(publicURL, tok.Token),
 				})
 			}
@@ -100,7 +100,8 @@ widen the policy on its end.`,
 	cmd.Flags().StringVar(&name, "name", "", "device name (unique within tenant)")
 	cmd.Flags().StringArrayVar(&targets, "target", nil, "target daemon name for a bridge token (repeatable for multi-target)")
 	cmd.Flags().BoolVar(&execEnabled, "exec-enabled", false, "daemon-only: allow the daemon to run exec/bg-exec (default off)")
-	cmd.Flags().StringSliceVar(&allowedPaths, "allowed-paths", nil, "daemon-only: filesystem paths the daemon may read/write (repeatable)")
+	cmd.Flags().StringVar(&defaultWorkingDir, "default-working-dir", "",
+		"daemon-only: AI working directory the daemon advertises (default: daemon user home)")
 	cmd.Flags().IntSliceVar(&forbiddenPorts, "forbidden-ports", nil, "daemon-only: TCP ports port_forward refuses (repeatable)")
 	cmd.Flags().IntVar(&ttlMinutes, "ttl", 15, "token TTL in minutes")
 	cmd.Flags().BoolVar(&emitJSON, "json", false, "emit machine-readable JSON")

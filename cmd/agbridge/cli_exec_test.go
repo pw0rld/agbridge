@@ -17,9 +17,8 @@ import (
 func TestExecLiveAgainstFixture(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
-		ExecEnabled:     true,
-		AllowedExecCwds: []string{tmpDir, tmpDir + "/*"},
-		EnvAllowlist:    []string{"PATH"},
+		ExecEnabled:  true,
+		EnvAllowlist: []string{"PATH"},
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -45,9 +44,8 @@ func TestExecLiveAgainstFixture(t *testing.T) {
 func TestExecJSONShape(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
-		ExecEnabled:     true,
-		AllowedExecCwds: []string{tmpDir, tmpDir + "/*"},
-		EnvAllowlist:    []string{"PATH"},
+		ExecEnabled:  true,
+		EnvAllowlist: []string{"PATH"},
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

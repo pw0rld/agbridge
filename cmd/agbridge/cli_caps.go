@@ -65,9 +65,7 @@ func runCaps(cmd *cobra.Command, opts cliclient.Options) error {
 			"daemon_hostname":     caps.DaemonHostname,
 			"agbridge_version":    caps.AgbridgeVersion,
 			"exec_enabled":        caps.ExecEnabled,
-			"allowed_exec_cwds":   caps.AllowedExecCwds,
-			"allowed_read_paths":  caps.AllowedReadPaths,
-			"allowed_write_paths": caps.AllowedWritePaths,
+			"default_working_dir": caps.DefaultWorkingDir,
 			"env_allowlist":       caps.EnvAllowlist,
 			"forbidden_ports":     caps.ForbiddenPorts,
 			"max_file_bytes":      caps.MaxFileBytes,
@@ -79,9 +77,7 @@ func runCaps(cmd *cobra.Command, opts cliclient.Options) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "agbridge_version:    %s\n", caps.AgbridgeVersion)
 	fmt.Fprintf(cmd.OutOrStdout(), "max_file_bytes:      %d\n", caps.MaxFileBytes)
 	fmt.Fprintf(cmd.OutOrStdout(), "exec_enabled:        %v\n", caps.ExecEnabled)
-	fmt.Fprintf(cmd.OutOrStdout(), "allowed_exec_cwds:   %v\n", caps.AllowedExecCwds)
-	fmt.Fprintf(cmd.OutOrStdout(), "allowed_read_paths:  %v\n", caps.AllowedReadPaths)
-	fmt.Fprintf(cmd.OutOrStdout(), "allowed_write_paths: %v\n", caps.AllowedWritePaths)
+	fmt.Fprintf(cmd.OutOrStdout(), "default_working_dir: %v\n", caps.DefaultWorkingDir)
 	fmt.Fprintf(cmd.OutOrStdout(), "env_allowlist:       %v\n", caps.EnvAllowlist)
 	fmt.Fprintf(cmd.OutOrStdout(), "forbidden_ports:     %v\n", caps.ForbiddenPorts)
 	return nil

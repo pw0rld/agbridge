@@ -73,9 +73,9 @@ type enrollOutcome struct {
 	DeviceID     string       `json:"device_id,omitempty"`
 	Role         string       `json:"role,omitempty"`
 	StatePath    string       `json:"state_path,omitempty"`
-	Service      string       `json:"service,omitempty"`       // installed unit name (daemon)
-	ServiceMode  string       `json:"service_mode,omitempty"`  // "system" | "user"
-	ServiceUser  string       `json:"service_user,omitempty"`  // system mode: the run-as account
+	Service      string       `json:"service,omitempty"`      // installed unit name (daemon)
+	ServiceMode  string       `json:"service_mode,omitempty"` // "system" | "user"
+	ServiceUser  string       `json:"service_user,omitempty"` // system mode: the run-as account
 	ServiceOK    bool         `json:"service_ok,omitempty"`
 	ServiceError string       `json:"service_error,omitempty"`
 	Steps        []enrollStep `json:"steps"`
@@ -294,9 +294,6 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 			NoiseStaticKeyPath:   keyPath,
 			E2EMode:              enrollResp.E2EMode,
 			ExecEnabled:          enrollResp.ExecEnabled,
-			AllowedExecCwds:      enrollResp.AllowedExecCwds,
-			AllowedReadPaths:     enrollResp.AllowedReadPaths,
-			AllowedWritePaths:    enrollResp.AllowedWritePaths,
 			EnvAllowlist:         enrollResp.EnvAllowlist,
 			ForbiddenPorts:       enrollResp.ForbiddenPorts,
 			AllowedBridgePubkeys: enrollResp.AllowedBridgePubkeys,
