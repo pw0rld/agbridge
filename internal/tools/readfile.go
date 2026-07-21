@@ -10,7 +10,6 @@ import (
 	"os"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // readChunkSize controls how many bytes each FileChunk carries. Bigger
@@ -22,9 +21,9 @@ const readChunkSize = 1 * 1024 * 1024
 // is expected to wrap the chunk in a transport frame and send it.
 type FileChunkEmitter func(c fileproto.FileChunk)
 
-// ReadFile streams the file at req.Path back through onChunk. allowedPaths is
-// the daemon-side allowlist; maxBytes caps the total bytes read (the caller
-// usually passes the bridge output cap, e.g. 10 MB).
+// ReadFile streams the file at req.Path back through onChunk. maxBytes caps
+// the total bytes read (the caller usually passes the bridge output cap,
+// e.g. 10 MB).
 //
 // Offset/Limit semantics:
 //   - Offset > file size  -> 0 bytes read, no error (EOF immediately)
@@ -35,9 +34,9 @@ type FileChunkEmitter func(c fileproto.FileChunk)
 // MaxSize on the request still caps total returned regardless of Limit.
 //
 // Returns FileComplete with Err set on any user-visible failure
-// (path_forbidden, not_found, exceeds_max_size, bad_payload). Only
+// (not_found, exceeds_max_size, bad_payload). Only
 // context cancellation / IO errors are returned as the second value.
-func ReadFile(ctx context.Context, req fileproto.FileReadRequest, allowedPaths []string, maxBytes int64, onChunk FileChunkEmitter) (fileproto.FileComplete, error) {
+func ReadFile(ctx context.Context, req fileproto.FileReadRequest, maxBytes int64, onChunk FileChunkEmitter) (fileproto.FileComplete, error) {
 	if req.Offset < 0 {
 		return fileproto.FileComplete{
 			Err:       "bad_payload",
@@ -48,12 +47,6 @@ func ReadFile(ctx context.Context, req fileproto.FileReadRequest, allowedPaths [
 		return fileproto.FileComplete{
 			Err:       "bad_payload",
 			ErrDetail: "limit must be >= 0 (0 means read to EOF)",
-		}, nil
-	}
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return fileproto.FileComplete{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
 		}, nil
 	}
 	f, err := os.Open(req.Path)

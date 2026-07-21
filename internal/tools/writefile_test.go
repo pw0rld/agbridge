@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -36,10 +35,9 @@ func chunksFrom(data []byte, chunkSize int) func() (fileproto.FileChunk, error) 
 func TestWriteFileHappy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.txt")
-	allow := []string{dir + "/*"}
 	body := []byte("hello write\n")
 	complete, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path, Mode: 0o600}, allow, 1<<20,
+		fileproto.FileWriteRequest{Path: path, Mode: 0o600}, 1<<20,
 		chunksFrom(body, 1024))
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -70,13 +68,12 @@ func TestWriteFileHappy(t *testing.T) {
 func TestWriteFileChunked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.bin")
-	allow := []string{dir + "/*"}
 	body := make([]byte, 200*1024)
 	for i := range body {
 		body[i] = byte(i)
 	}
 	_, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path}, allow, 1<<20,
+		fileproto.FileWriteRequest{Path: path}, 1<<20,
 		chunksFrom(body, 32*1024))
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -87,38 +84,37 @@ func TestWriteFileChunked(t *testing.T) {
 	}
 }
 
-func TestWriteFilePathForbidden(t *testing.T) {
+func TestWriteFileNoPathGate(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-	allowlist := []string{"/different/a", "/different/b/*"}
-	complete, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path}, allowlist, 1<<20,
-		chunksFrom([]byte("x"), 1))
-	if err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if complete.Err != "path_forbidden" {
-		t.Errorf("err: %q", complete.Err)
-	}
-	if complete.ErrDetail == "" {
-		t.Fatal("ErrDetail should not be empty on path_forbidden")
-	}
-	for _, want := range allowlist {
-		if !strings.Contains(complete.ErrDetail, want) {
-			t.Errorf("ErrDetail %q missing allowlist entry %q", complete.ErrDetail, want)
+	dest := filepath.Join(dir, "out.txt") // no allowlist anywhere
+	data := []byte("hello")
+	src := func() func() (fileproto.FileChunk, error) {
+		sent := false
+		return func() (fileproto.FileChunk, error) {
+			if sent {
+				return fileproto.FileChunk{Eof: true}, nil
+			}
+			sent = true
+			return fileproto.FileChunk{Data: data, Eof: true}, nil
 		}
+	}()
+	got, err := WriteFile(context.Background(), fileproto.FileWriteRequest{Path: dest}, int64(len(data)), src)
+	if err != nil {
+		t.Fatalf("WriteFile err: %v", err)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("file should not exist")
+	if got.Err != "" {
+		t.Fatalf("unexpected tool err: %q / %q", got.Err, got.ErrDetail)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != "hello" {
+		t.Fatalf("file contents = %q, want hello", string(b))
 	}
 }
 
 func TestWriteFileExceedsMaxSize(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "huge")
-	allow := []string{dir + "/*"}
 	complete, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path}, allow, 100,
+		fileproto.FileWriteRequest{Path: path}, 100,
 		chunksFrom(make([]byte, 1024), 64))
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -137,12 +133,11 @@ func TestWriteFileAtomicOnSourceError(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	allow := []string{dir + "/*"}
 	failing := func() (fileproto.FileChunk, error) {
 		return fileproto.FileChunk{}, io.ErrUnexpectedEOF
 	}
 	complete, err := WriteFile(context.Background(),
-		fileproto.FileWriteRequest{Path: path}, allow, 1<<20, failing)
+		fileproto.FileWriteRequest{Path: path}, 1<<20, failing)
 	if err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

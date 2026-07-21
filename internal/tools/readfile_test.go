@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
@@ -19,10 +18,9 @@ func TestReadFileHappy(t *testing.T) {
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	allow := []string{dir + "/*"}
 	var got []byte
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: path}, allow, 1<<20,
+		fileproto.FileReadRequest{Path: path}, 1<<20,
 		func(c fileproto.FileChunk) { got = append(got, c.Data...) })
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -54,11 +52,10 @@ func TestReadFileChunked(t *testing.T) {
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	allow := []string{dir + "/*"}
 	chunks := 0
 	var got []byte
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: path}, allow, int64(len(body)+1),
+		fileproto.FileReadRequest{Path: path}, int64(len(body)+1),
 		func(c fileproto.FileChunk) {
 			chunks++
 			got = append(got, c.Data...)
@@ -77,36 +74,25 @@ func TestReadFileChunked(t *testing.T) {
 	}
 }
 
-func TestReadFilePathForbidden(t *testing.T) {
+func TestReadFileNoPathGate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.txt")
 	_ = os.WriteFile(path, []byte("x"), 0o644)
-	allowlist := []string{"/different/a", "/different/b/*"}
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: path}, allowlist, 1<<20,
+		fileproto.FileReadRequest{Path: path}, 1<<20,
 		func(c fileproto.FileChunk) {})
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if complete.Err != "path_forbidden" {
-		t.Errorf("err: %q", complete.Err)
-	}
-	// detail must surface the allowlist so the AI knows what's permitted
-	if complete.ErrDetail == "" {
-		t.Fatal("ErrDetail should not be empty for path_forbidden")
-	}
-	for _, want := range allowlist {
-		if !strings.Contains(complete.ErrDetail, want) {
-			t.Errorf("ErrDetail %q missing allowlist entry %q", complete.ErrDetail, want)
-		}
+	if complete.Err != "" {
+		t.Errorf("unexpected err: %q / %q", complete.Err, complete.ErrDetail)
 	}
 }
 
 func TestReadFileNotFound(t *testing.T) {
 	dir := t.TempDir()
-	allow := []string{dir + "/*"}
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: filepath.Join(dir, "nope")}, allow, 1<<20,
+		fileproto.FileReadRequest{Path: filepath.Join(dir, "nope")}, 1<<20,
 		func(c fileproto.FileChunk) {})
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -121,12 +107,11 @@ func TestReadFileWithOffsetAndLimit(t *testing.T) {
 	path := filepath.Join(dir, "f.txt")
 	data := []byte("0123456789ABCDEFGHIJ") // 20 bytes
 	_ = os.WriteFile(path, data, 0o644)
-	allow := []string{dir + "/*"}
 
 	var got []byte
 	complete, err := ReadFile(context.Background(),
 		fileproto.FileReadRequest{Path: path, Offset: 10, Limit: 5},
-		allow, 1<<20,
+		1<<20,
 		func(c fileproto.FileChunk) { got = append(got, c.Data...) })
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -151,11 +136,10 @@ func TestReadFileOffsetPastEOF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("short"), 0o644)
-	allow := []string{dir + "/*"}
 	var emitted bool
 	complete, err := ReadFile(context.Background(),
 		fileproto.FileReadRequest{Path: path, Offset: 1000},
-		allow, 1<<20,
+		1<<20,
 		func(c fileproto.FileChunk) {
 			if !c.Eof || len(c.Data) > 0 {
 				emitted = true
@@ -179,10 +163,9 @@ func TestReadFileNegativeOffsetRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("x"), 0o644)
-	allow := []string{dir + "/*"}
 	complete, _ := ReadFile(context.Background(),
 		fileproto.FileReadRequest{Path: path, Offset: -1},
-		allow, 1<<20,
+		1<<20,
 		func(c fileproto.FileChunk) {})
 	if complete.Err != "bad_payload" {
 		t.Errorf("expected bad_payload, got %q", complete.Err)
@@ -193,11 +176,10 @@ func TestReadFileLimitLargerThanFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	_ = os.WriteFile(path, []byte("abc"), 0o644)
-	allow := []string{dir + "/*"}
 	var got []byte
 	complete, _ := ReadFile(context.Background(),
 		fileproto.FileReadRequest{Path: path, Limit: 999},
-		allow, 1<<20,
+		1<<20,
 		func(c fileproto.FileChunk) { got = append(got, c.Data...) })
 	if string(got) != "abc" || complete.Size != 3 {
 		t.Errorf("Limit > file should read full file, got %q size=%d", got, complete.Size)
@@ -210,9 +192,8 @@ func TestReadFileExceedsMaxSize(t *testing.T) {
 	if err := os.WriteFile(path, make([]byte, 1024), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	allow := []string{dir + "/*"}
 	complete, err := ReadFile(context.Background(),
-		fileproto.FileReadRequest{Path: path}, allow, 100,
+		fileproto.FileReadRequest{Path: path}, 100,
 		func(c fileproto.FileChunk) {})
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)

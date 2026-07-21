@@ -6,22 +6,14 @@ import (
 	"os"
 
 	"github.com/pw0rld/agbridge/internal/fsproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // ListDirectory returns the immediate children of req.Path (non-recursive).
-// Honors allowed_read_paths since directory contents are metadata leak.
 //
-// Returns ListDirResponse.Err set for path_forbidden, not_found,
-// not_a_directory, or read_failed. The Err field is also set when the
-// underlying readdir returns a partial error.
-func ListDirectory(req fsproto.ListDirRequest, allowedPaths []string) fsproto.ListDirResponse {
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return fsproto.ListDirResponse{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}
-	}
+// Returns ListDirResponse.Err set for not_found, not_a_directory, or
+// read_failed. The Err field is also set when the underlying readdir
+// returns a partial error.
+func ListDirectory(req fsproto.ListDirRequest) fsproto.ListDirResponse {
 	info, err := os.Stat(req.Path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -53,14 +45,8 @@ func ListDirectory(req fsproto.ListDirRequest, allowedPaths []string) fsproto.Li
 	return fsproto.ListDirResponse{Entries: entries}
 }
 
-// Stat returns metadata for a single path. Honors allowed_read_paths.
-func Stat(req fsproto.StatRequest, allowedPaths []string) fsproto.StatResponse {
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return fsproto.StatResponse{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}
-	}
+// Stat returns metadata for a single path.
+func Stat(req fsproto.StatRequest) fsproto.StatResponse {
 	info, err := os.Lstat(req.Path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

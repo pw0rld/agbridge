@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pw0rld/agbridge/internal/sandbox"
 	"github.com/pw0rld/agbridge/internal/searchproto"
 )
 
@@ -50,23 +49,17 @@ var defaultIgnoredDirs = map[string]struct{}{
 	".terraform":      {},
 }
 
-// Search walks path and returns matches. Honors allowed_read_paths.
+// Search walks path and returns matches.
 // regex=true (default) treats pattern as RE2; regex=false treats as a
 // literal substring. Glob (e.g. "**/*.go") further filters files; empty
 // = no extra filter.
-func Search(req searchproto.SearchRequest, allowedPaths []string) searchproto.SearchResponse {
+func Search(req searchproto.SearchRequest) searchproto.SearchResponse {
 	t0 := time.Now()
 	if req.Pattern == "" {
 		return searchproto.SearchResponse{Err: "bad_payload", ErrDetail: "pattern required"}
 	}
 	if req.Path == "" {
 		return searchproto.SearchResponse{Err: "bad_payload", ErrDetail: "path required"}
-	}
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return searchproto.SearchResponse{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_read_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}
 	}
 
 	maxResults := req.MaxResults
