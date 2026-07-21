@@ -46,6 +46,7 @@ type BridgeState struct {
 	E2EMode             string               `json:"e2e_mode"`
 	DefaultTarget       string               `json:"default_target"`
 	KnownDaemons        map[string]DaemonRef `json:"known_daemons"`
+	WorkingDir          string               `json:"working_dir,omitempty"`
 	EnrolledAt          time.Time            `json:"enrolled_at"`
 }
 
