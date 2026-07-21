@@ -314,12 +314,45 @@ func setupUserService(ctx context.Context, res daemonServiceResult, exe, stateDi
 	return res
 }
 
+// ensureNoSymlinkBelowHome refuses if any existing path component of
+// stateDir *below* home is a symlink. The service user owns their home
+// and everything under it, so a symlinked component there could redirect
+// root's MkdirAll/chown to an attacker-chosen target (local privesc).
+// Components at or above home are admin-controlled and not checked, so
+// legitimately symlinked parents (e.g. /home) don't trip this.
+func ensureNoSymlinkBelowHome(stateDir, home string) error {
+	if home == "" {
+		return nil
+	}
+	home = strings.TrimRight(filepath.Clean(home), "/")
+	dir := filepath.Clean(stateDir)
+	if dir == home || !strings.HasPrefix(dir, home+"/") {
+		return nil // not under the untrusted user's home
+	}
+	rel := strings.TrimPrefix(dir, home+"/")
+	cur := home
+	for _, part := range strings.Split(rel, "/") {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // remaining components don't exist yet; nothing to hijack
+			}
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to use state dir: %q is a symlink", cur)
+		}
+	}
+	return nil
+}
+
 func chownRecursive(root string, uid, gid int) error {
 	return filepath.Walk(root, func(path string, _ os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		return os.Chown(path, uid, gid)
+		return os.Lchown(path, uid, gid)
 	})
 }
 
@@ -337,7 +370,7 @@ func chownStateTree(stateDir string, u *serviceUser) error {
 	}
 	prefix := strings.TrimRight(u.Home, "/") + "/"
 	for p := filepath.Dir(stateDir); strings.HasPrefix(p, prefix); p = filepath.Dir(p) {
-		if err := os.Chown(p, u.UID, u.GID); err != nil {
+		if err := os.Lchown(p, u.UID, u.GID); err != nil {
 			return err
 		}
 	}
