@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# agbridge install script.
+# agbridge installer for Linux, macOS, and Windows Git Bash/MSYS2/Cygwin.
+# For native Windows PowerShell, use install.ps1 instead.
 #
 # Usage:
 #   curl -sSL https://github.com/pw0rld/agbridge/raw/main/scripts/install.sh | bash
@@ -12,109 +13,60 @@
 #   VERSION=v0.1.0-phase-b   pin a specific release (default: latest)
 #   INSTALL_DIR=/opt/bin     install path (default: $HOME/bin)
 #   REPO=user/fork           target a fork (default: pw0rld/agbridge)
-#   AGBRIDGE_GITHUB_PROXIES  whitespace-separated proxy prefixes
-#                            (default: several public GitHub proxies)
-#   AGBRIDGE_DOWNLOAD_TIMEOUT seconds before falling back when curl gets no response/data
 set -euo pipefail
 
 REPO="${REPO:-pw0rld/agbridge}"
 VERSION="${VERSION:-}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/bin}"
-AGBRIDGE_DOWNLOAD_TIMEOUT="${AGBRIDGE_DOWNLOAD_TIMEOUT:-20}"
-AGBRIDGE_GITHUB_PROXIES="${AGBRIDGE_GITHUB_PROXIES:-${GITHUB_PROXIES:-${GITHUB_PROXY_URL:-}}}"
-if [ -z "$AGBRIDGE_GITHUB_PROXIES" ]; then
-  AGBRIDGE_GITHUB_PROXIES="https://gh.llkk.cc/ https://ghfast.top/ https://ghproxy.net/"
-fi
-
-curl_download() {
-  local url="$1"
-  local out="$2"
-  curl -fsSL \
-    --connect-timeout "$AGBRIDGE_DOWNLOAD_TIMEOUT" \
-    --speed-time "$AGBRIDGE_DOWNLOAD_TIMEOUT" \
-    --speed-limit 1 \
-    "$url" -o "$out"
-}
-
-proxied_url() {
-  local proxy="$1"
-  local url="$2"
-  if [ -z "$proxy" ]; then
-    printf '%s\n' "$url"
-    return
-  fi
-  printf '%s/%s\n' "${proxy%/}" "$url"
-}
-
-download_with_fallback() {
-  local url="$1"
-  local out="$2"
-  local label="$3"
-  local candidate
-  local proxy
-
-  echo "agbridge: downloading $label from $url"
-  if curl_download "$url" "$out"; then
-    return 0
-  fi
-
-  for proxy in $AGBRIDGE_GITHUB_PROXIES; do
-    candidate="$(proxied_url "$proxy" "$url")"
-    echo "agbridge: primary download failed; trying proxy $proxy"
-    if curl_download "$candidate" "$out"; then
-      echo "agbridge: downloaded $label via proxy $proxy"
-      return 0
-    fi
-  done
-
-  echo "agbridge: failed to download $label from GitHub or configured proxies" >&2
-  return 1
-}
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+EXE_SUFFIX=""
 case "$OS" in
   linux|darwin) ;;
+  mingw*|msys*|cygwin*) OS="windows"; EXE_SUFFIX=".exe" ;;
   *) echo "agbridge: unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
 ARCH="$(uname -m)"
+# Windows may report the emulated shell's architecture via uname.
+# On WSL, keep uname's Linux architecture even if Windows env vars exist.
+if [ "$OS" = "windows" ]; then
+  ARCH="${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-$ARCH}}"
+fi
+ARCH="$(printf '%s' "$ARCH" | tr '[:upper:]' '[:lower:]')"
 case "$ARCH" in
   x86_64|amd64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
   *) echo "agbridge: unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
-
 if [ -z "$VERSION" ]; then
   echo "agbridge: detecting latest release for $REPO …"
-  LATEST_JSON="$TMPDIR/latest.json"
-  if ! download_with_fallback "https://api.github.com/repos/${REPO}/releases/latest" "$LATEST_JSON" "latest release metadata"; then
-    echo "agbridge: could not detect latest release; pass VERSION=…" >&2
-    exit 1
-  fi
-  VERSION="$(grep '"tag_name":' "$LATEST_JSON" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
   if [ -z "$VERSION" ]; then
     echo "agbridge: could not detect latest release; pass VERSION=…" >&2
     exit 1
   fi
 fi
 
-BIN="agbridge-${OS}-${ARCH}"
+BIN="agbridge-${OS}-${ARCH}${EXE_SUFFIX}"
+INSTALL_NAME="agbridge${EXE_SUFFIX}"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${BIN}"
 SUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"
 
-TMP="$TMPDIR/$BIN"
-SUMS="$TMPDIR/SHA256SUMS"
+TMP="$(mktemp)"
+trap 'rm -f "$TMP" "$TMP.sums"' EXIT
 
-if ! download_with_fallback "$URL" "$TMP" "$BIN"; then
+echo "agbridge: downloading $URL"
+if ! curl -fsSL "$URL" -o "$TMP"; then
+  echo "agbridge: download failed" >&2
   exit 1
 fi
 
 # Verify checksum if SHA256SUMS exists alongside the binary.
-if download_with_fallback "$SUMS_URL" "$SUMS" "SHA256SUMS" 2>/dev/null; then
-  EXPECTED="$(grep " $BIN\$" "$SUMS" | awk '{print $1}' || true)"
+if curl -fsSL "$SUMS_URL" -o "$TMP.sums" 2>/dev/null; then
+  EXPECTED="$(grep " $BIN\$" "$TMP.sums" | awk '{print $1}' || true)"
   if [ -n "$EXPECTED" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
       ACTUAL="$(sha256sum "$TMP" | awk '{print $1}')"
@@ -138,9 +90,9 @@ if [ ! -w "$INSTALL_DIR" ]; then
   echo "agbridge: pick a writable path, e.g. INSTALL_DIR=\$HOME/bin or INSTALL_DIR=/tmp" >&2
   exit 1
 fi
-install -m 0755 "$TMP" "$INSTALL_DIR/agbridge"
+install -m 0755 "$TMP" "$INSTALL_DIR/$INSTALL_NAME"
 
-echo "agbridge: installed to $INSTALL_DIR/agbridge"
+echo "agbridge: installed to $INSTALL_DIR/$INSTALL_NAME"
 
 case ":${PATH}:" in
   *":$INSTALL_DIR:"*) ;;
@@ -152,4 +104,4 @@ case ":${PATH}:" in
     ;;
 esac
 
-"$INSTALL_DIR/agbridge" --help 2>&1 | head -3 || true
+"$INSTALL_DIR/$INSTALL_NAME" --help 2>&1 | head -3 || true
