@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -232,6 +233,9 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 	role := "bridge"
 	if enrollResp.TargetDaemon == "" {
 		role = "daemon"
+	}
+	if runtime.GOOS == "windows" && role == "daemon" {
+		return fail("device_role", fmt.Errorf("Windows supports the CLI client only; create a bridge device and enroll with its token (this daemon token has already been exchanged)"))
 	}
 	report("token_exchange", true, fmt.Sprintf("device_id=%s role=%s", enrollResp.DeviceID, role), time.Since(t0))
 

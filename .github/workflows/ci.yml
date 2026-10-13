@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 jobs:
   test:
@@ -11,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
@@ -25,3 +28,28 @@ jobs:
 
       - name: go test -race
         run: go test -race -count=1 ./...
+
+  windows-cli:
+    name: Windows CLI + installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: build Windows CLI
+        run: go build -o agbridge.exe ./cmd/agbridge
+      - name: client commands, enrollment, encrypted RPC and file transfer
+        run: go test -count=1 ./cmd/agbridge -run 'Test(CLIPlatform|WindowsClient|ResolveRemotePath|BuildKnownDaemons|GlobalFlags|LoadOpts|ConfigUse|Targets)'
+      - name: installer verification
+        shell: powershell
+        run: ./scripts/test-install.ps1 -Binary ./agbridge.exe
+      - name: cross-build Windows ARM64
+        shell: pwsh
+        run: |
+          $env:GOARCH = 'arm64'
+          $env:CGO_ENABLED = '0'
+          go build -o agbridge-windows-arm64.exe ./cmd/agbridge
