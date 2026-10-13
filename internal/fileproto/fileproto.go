@@ -78,7 +78,7 @@ type FileChunk struct {
 // FileComplete is the terminator. Read: daemon → bridge. Write: daemon →
 // bridge after Eof chunk processed. Err is empty on success. ErrDetail
 // is an operator-/AI-readable description (e.g., allowlist contents on
-// path_forbidden) — old bridges can ignore it. BackupPath is populated
+// access errors) — old bridges can ignore it. BackupPath is populated
 // by edit_file when a pre-edit backup was written; empty means no
 // backup (new file, or backup failed non-fatally).
 type FileComplete struct {

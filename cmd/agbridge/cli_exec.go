@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -99,14 +100,30 @@ func runExec(cmd *cobra.Command, remote []string, cwd string, env map[string]str
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
 
+	if cwd == "" {
+		wd, err := ensureWorkingDir(ctx, opts)
+		if err != nil {
+			printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+			return err
+		}
+		cwd = wd
+	} else if path.IsAbs(cwd) {
+		cwd = path.Clean(cwd)
+	} else {
+		resolved, err := resolveArg(ctx, opts, cwd)
+		if err != nil {
+			printErrorJSON(cmd.ErrOrStderr(), "working_dir_unavailable", err.Error(), true)
+			return err
+		}
+		cwd = resolved
+	}
+
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
 		argsMap := map[string]any{
 			"cmd":        remote[0],
 			"args":       remote[1:],
 			"timeout_ms": timeoutMs,
-		}
-		if cwd != "" {
-			argsMap["cwd"] = cwd
+			"cwd":        cwd,
 		}
 		if len(env) > 0 {
 			argsMap["env"] = env

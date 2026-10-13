@@ -94,6 +94,41 @@ From source:
 go install github.com/pw0rld/agbridge/cmd/agbridge@latest
 ```
 
+### Windows CLI
+
+Windows x64 and ARM64 support the CLI client. Run the remote daemon on
+Linux or macOS. No local service or MCP configuration is needed.
+
+In PowerShell, download and run the installer (no administrator required):
+
+```powershell
+Invoke-WebRequest 'https://github.com/pw0rld/agbridge/releases/latest/download/install.ps1' -OutFile "$env:TEMP\agbridge-install.ps1"
+& "$env:TEMP\agbridge-install.ps1"
+agbridge enroll --gateway 'wss://relay.agbridge.cloud/' --tls-mode webpki --token 'YOUR_BRIDGE_TOKEN'
+agbridge status
+agbridge ls /home
+```
+
+The installer verifies SHA-256, installs `agbridge.exe` to
+`%LOCALAPPDATA%\agbridge\bin`, and updates the current and user PATH.
+If script execution is restricted, run the reviewed script with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\agbridge-install.ps1"`,
+then open a new terminal for the updated PATH. Existing AI clients may
+need a restart to inherit the PATH. Releases also provide standalone
+`agbridge-windows-amd64.exe` and `agbridge-windows-arm64.exe` files.
+
+State and keys live in `%USERPROFILE%\.config\agbridge` by default.
+Remote paths always use POSIX syntax; local transfer paths use Windows syntax:
+
+```powershell
+agbridge put 'C:\Users\me\project\config.json' /srv/app/config.json
+agbridge get /srv/app/result.zip '.\result.zip'
+agbridge exec --cwd /srv/app -- git status
+```
+
+Create a **bridge** device in Cloud and use its token on Windows. Daemon
+enrollment and `agbridge daemon` are unsupported on Windows.
+
 ## Quickstart
 
 If a gateway operator gives you a paste command, run it on the device

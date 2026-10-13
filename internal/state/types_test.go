@@ -54,12 +54,10 @@ func TestDaemonStateRoundTrip(t *testing.T) {
 		Gateway:              GatewayRef{URL: "wss://gw.test/", CertPin: "sha256:abc"},
 		NoiseStaticKeyPath:   "daemon.key",
 		E2EMode:              "required",
-		AllowedExecCwds:      []string{"/home/me/projects"},
-		AllowedReadPaths:     []string{"/home/me/projects"},
-		AllowedWritePaths:    []string{"/home/me/projects"},
 		EnvAllowlist:         []string{"PATH", "HOME"},
 		ForbiddenPorts:       []int{22},
 		AllowedBridgePubkeys: []string{"pubA", "pubB"},
+		DefaultWorkingDir:    "/home/me/projects",
 		EnrolledAt:           time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC),
 	}
 	b, _ := json.Marshal(in)
@@ -69,6 +67,9 @@ func TestDaemonStateRoundTrip(t *testing.T) {
 	}
 	if len(out.AllowedBridgePubkeys) != 2 {
 		t.Fatalf("allowed_bridge_pubkeys lost: %v", out.AllowedBridgePubkeys)
+	}
+	if out.DefaultWorkingDir != "/home/me/projects" {
+		t.Fatalf("default_working_dir lost: %q", out.DefaultWorkingDir)
 	}
 }
 

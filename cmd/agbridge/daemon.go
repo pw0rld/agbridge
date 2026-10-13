@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -119,6 +121,18 @@ func loadDaemonConfig(cfgPath, stateDir string) (*config.DaemonConfig, error) {
 	return config.LoadDaemon(cfgPath)
 }
 
+// effectiveDefaultWorkingDir resolves the daemon's advertised working dir:
+// the configured value if set, else the daemon user's home, else "/".
+func effectiveDefaultWorkingDir(cfg *config.DaemonConfig) string {
+	if cfg.DefaultWorkingDir != "" {
+		return cfg.DefaultWorkingDir
+	}
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return "/"
+}
+
 func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 	return &config.DaemonConfig{
 		GatewayURL:           s.Gateway.URL,
@@ -127,14 +141,12 @@ func daemonConfigFromState(s *state.DaemonState) *config.DaemonConfig {
 		CertPin:              s.Gateway.CertPin,
 		GatewayTLSMode:       s.Gateway.TLSMode,
 		ExecEnabled:          s.ExecEnabled,
-		AllowedExecCwds:      s.AllowedExecCwds,
 		EnvAllowlist:         s.EnvAllowlist,
-		AllowedReadPaths:     s.AllowedReadPaths,
-		AllowedWritePaths:    s.AllowedWritePaths,
 		ForbiddenPorts:       s.ForbiddenPorts,
 		E2EMode:              s.E2EMode,
 		NoiseStaticKeyPath:   s.NoiseStaticKeyPath,
 		AllowedBridgePubkeys: s.AllowedBridgePubkeys,
+		DefaultWorkingDir:    s.DefaultWorkingDir,
 	}
 }
 
@@ -491,13 +503,11 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 		DaemonName:        s.cfg.DaemonName,
 		DaemonHostname:    hostname,
 		ExecEnabled:       s.cfg.ExecEnabled,
-		AllowedExecCwds:   append([]string(nil), s.cfg.AllowedExecCwds...),
-		AllowedReadPaths:  append([]string(nil), s.cfg.AllowedReadPaths...),
-		AllowedWritePaths: append([]string(nil), s.cfg.AllowedWritePaths...),
 		EnvAllowlist:      append([]string(nil), s.cfg.EnvAllowlist...),
 		ForbiddenPorts:    append([]int(nil), s.cfg.ForbiddenPorts...),
 		MaxFileBytes:      maxFileBytes,
 		AgbridgeVersion:   agbridgeVersion,
+		DefaultWorkingDir: effectiveDefaultWorkingDir(s.cfg),
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
@@ -510,7 +520,7 @@ func (s *daemonState) handleListDir(ctx context.Context, inner proto.Frame) {
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
 		return
 	}
-	resp := tools.ListDirectory(req, s.cfg.AllowedReadPaths)
+	resp := tools.ListDirectory(req)
 	payload, _ := resp.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeListDirResponse, ReqID: inner.ReqID, Payload: payload})
 }
@@ -522,7 +532,7 @@ func (s *daemonState) handleStat(ctx context.Context, inner proto.Frame) {
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
 		return
 	}
-	resp := tools.Stat(req, s.cfg.AllowedReadPaths)
+	resp := tools.Stat(req)
 	payload, _ := resp.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: payload})
 }
@@ -549,9 +559,9 @@ func (s *daemonState) handleUpload(ctx context.Context, inner proto.Frame, slot 
 				return fileproto.FileChunk{}, ctx.Err()
 			}
 		}
-		complete, _ = tools.UploadChunks(ctx, req, s.cfg.AllowedWritePaths, next)
+		complete, _ = tools.UploadChunks(ctx, req, next)
 	case "url":
-		complete, _ = tools.UploadURL(ctx, req, s.cfg.AllowedWritePaths)
+		complete, _ = tools.UploadURL(ctx, req)
 	default:
 		complete = fileproto.FileComplete{
 			Err:       "bad_payload",
@@ -567,14 +577,13 @@ func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
 		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
 		return
 	}
-	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can
-	// flow. AllowedReadPaths is the gate, same as read_file.
+	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can flow.
 	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit}
 	onChunk := func(c fileproto.FileChunk) {
 		payload, _ := c.Encode()
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
 	}
-	complete, _ := tools.ReadFile(ctx, rdReq, s.cfg.AllowedReadPaths, tools.UploadMaxBytes, onChunk)
+	complete, _ := tools.ReadFile(ctx, rdReq, tools.UploadMaxBytes, onChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
@@ -585,7 +594,7 @@ func (s *daemonState) handleSearch(ctx context.Context, inner proto.Frame) {
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
 		return
 	}
-	resp := tools.Search(req, s.cfg.AllowedReadPaths)
+	resp := tools.Search(req)
 	payload, _ := resp.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeSearchResponse, ReqID: inner.ReqID, Payload: payload})
 }
@@ -623,7 +632,7 @@ func (s *daemonState) handleEdit(ctx context.Context, inner proto.Frame) {
 		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
 		return
 	}
-	complete, _ := tools.EditFile(ctx, req, s.cfg.AllowedWritePaths, maxFileBytes)
+	complete, _ := tools.EditFile(ctx, req, maxFileBytes)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
@@ -637,7 +646,7 @@ func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {
 		payload, _ := c.Encode()
 		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
 	}
-	complete, _ := tools.ReadFile(ctx, req, s.cfg.AllowedReadPaths, maxFileBytes, onChunk)
+	complete, _ := tools.ReadFile(ctx, req, maxFileBytes, onChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
@@ -668,7 +677,7 @@ func (s *daemonState) handleWrite(ctx context.Context, inner proto.Frame, slot *
 			return fileproto.FileChunk{}, ctx.Err()
 		}
 	}
-	complete, _ := tools.WriteFile(ctx, req, s.cfg.AllowedWritePaths, maxFileBytes, next)
+	complete, _ := tools.WriteFile(ctx, req, maxFileBytes, next)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 

@@ -37,11 +37,10 @@ func TestUploadChunksHappy(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
 	body := []byte("hello upload chunks\n")
-	allow := []string{dir + "/*"}
 
 	complete, err := UploadChunks(context.Background(),
 		fileproto.UploadRequest{DestPath: dst, Mode: 0o644, Source: "chunks"},
-		allow, chunksFromBytes(body, 5))
+		chunksFromBytes(body, 5))
 	if err != nil {
 		t.Fatalf("UploadChunks: %v", err)
 	}
@@ -61,31 +60,26 @@ func TestUploadChunksHappy(t *testing.T) {
 	}
 }
 
-func TestUploadChunksPathForbidden(t *testing.T) {
+func TestUploadChunksNoPathGate(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allowlist := []string{"/different/a"}
 	complete, _ := UploadChunks(context.Background(),
 		fileproto.UploadRequest{DestPath: dst, Source: "chunks"},
-		allowlist, chunksFromBytes([]byte("x"), 1))
-	if complete.Err != "path_forbidden" {
-		t.Errorf("err: %q", complete.Err)
-	}
-	if !strings.Contains(complete.ErrDetail, "/different/a") {
-		t.Errorf("ErrDetail missing allowlist: %q", complete.ErrDetail)
+		chunksFromBytes([]byte("x"), 1))
+	if complete.Err != "" {
+		t.Errorf("unexpected err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
 }
 
 func TestUploadChunksShaMismatch(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	complete, _ := UploadChunks(context.Background(),
 		fileproto.UploadRequest{
 			DestPath: dst, Source: "chunks",
 			ExpectedSha256: "deadbeef" + strings.Repeat("0", 56),
 		},
-		allow, chunksFromBytes([]byte("hello"), 5))
+		chunksFromBytes([]byte("hello"), 5))
 	if complete.Err != "sha256_mismatch" {
 		t.Errorf("err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
@@ -98,10 +92,9 @@ func TestUploadChunksShaMismatch(t *testing.T) {
 func TestUploadChunksSizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	complete, _ := UploadChunks(context.Background(),
 		fileproto.UploadRequest{DestPath: dst, Source: "chunks", ExpectedSize: 999},
-		allow, chunksFromBytes([]byte("hi"), 2))
+		chunksFromBytes([]byte("hi"), 2))
 	if complete.Err != "size_mismatch" {
 		t.Errorf("err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
@@ -113,7 +106,6 @@ func TestUploadChunksSizeMismatch(t *testing.T) {
 func TestUploadChunksAtomicWhenCancelled(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	// Pre-create the dest path with known content; if upload fails
 	// mid-stream, original should remain untouched.
 	_ = os.WriteFile(dst, []byte("ORIGINAL"), 0o644)
@@ -121,7 +113,7 @@ func TestUploadChunksAtomicWhenCancelled(t *testing.T) {
 	cancel() // already cancelled
 	complete, err := UploadChunks(ctx,
 		fileproto.UploadRequest{DestPath: dst, Source: "chunks"},
-		allow, chunksFromBytes([]byte("new"), 1))
+		chunksFromBytes([]byte("new"), 1))
 	if err == nil && complete.Err == "" {
 		t.Errorf("expected error on cancelled ctx")
 	}
@@ -140,10 +132,8 @@ func TestUploadURLHappy(t *testing.T) {
 
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	complete, err := UploadURL(context.Background(),
-		fileproto.UploadRequest{DestPath: dst, Source: "url", URL: srv.URL, Mode: 0o600},
-		allow)
+		fileproto.UploadRequest{DestPath: dst, Source: "url", URL: srv.URL, Mode: 0o600})
 	if err != nil {
 		t.Fatalf("UploadURL: %v", err)
 	}
@@ -167,10 +157,8 @@ func TestUploadURL404(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	complete, _ := UploadURL(context.Background(),
-		fileproto.UploadRequest{DestPath: dst, Source: "url", URL: srv.URL},
-		allow)
+		fileproto.UploadRequest{DestPath: dst, Source: "url", URL: srv.URL})
 	if complete.Err != "fetch_failed" {
 		t.Errorf("err: %q (%s)", complete.Err, complete.ErrDetail)
 	}
@@ -187,12 +175,11 @@ func TestUploadURLShaMismatchAborts(t *testing.T) {
 	defer srv.Close()
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "out.bin")
-	allow := []string{dir + "/*"}
 	complete, _ := UploadURL(context.Background(),
 		fileproto.UploadRequest{
 			DestPath: dst, Source: "url", URL: srv.URL,
 			ExpectedSha256: "0000000000000000000000000000000000000000000000000000000000000000",
-		}, allow)
+		})
 	if complete.Err != "sha256_mismatch" {
 		t.Errorf("err: %q (%s)", complete.Err, complete.ErrDetail)
 	}

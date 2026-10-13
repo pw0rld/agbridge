@@ -6,9 +6,7 @@ func TestRoundTrip(t *testing.T) {
 	orig := Capabilities{
 		DaemonName:        "lab01",
 		DaemonHostname:    "host.local",
-		AllowedExecCwds:   []string{"/foo", "/foo/*"},
-		AllowedReadPaths:  []string{"/foo", "/foo/*"},
-		AllowedWritePaths: []string{"/foo", "/foo/*"},
+		DefaultWorkingDir: "/home/user/projects",
 		EnvAllowlist:      []string{"PATH", "HOME"},
 		ForbiddenPorts:    []int{22, 443},
 		MaxFileBytes:      10 << 20,
@@ -25,8 +23,8 @@ func TestRoundTrip(t *testing.T) {
 	if got.DaemonName != orig.DaemonName || got.DaemonHostname != orig.DaemonHostname {
 		t.Errorf("name/hostname lost: %+v", got)
 	}
-	if len(got.AllowedExecCwds) != 2 || got.AllowedExecCwds[1] != "/foo/*" {
-		t.Errorf("exec cwds lost: %+v", got.AllowedExecCwds)
+	if got.DefaultWorkingDir != "/home/user/projects" {
+		t.Errorf("default_working_dir lost: %+v", got.DefaultWorkingDir)
 	}
 	if got.MaxFileBytes != 10<<20 {
 		t.Errorf("max_file_bytes: %d", got.MaxFileBytes)

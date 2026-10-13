@@ -117,12 +117,12 @@ func TestTokenDaemonPolicy(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := NewTokenStore(filepath.Join(dir, "tokens.json"))
 	policy := &DaemonPolicy{
-		AllowedPaths:   []string{"/home/me/projects"},
-		ForbiddenPorts: []int{22},
+		DefaultWorkingDir: "/home/me/projects",
+		ForbiddenPorts:    []int{22},
 	}
 	tok, _ := store.Issue(TokenRequest{Role: "daemon", Name: "lab", TTL: time.Hour, Policy: policy})
 	got, _ := store.Consume(tok.Token)
-	if got.Policy == nil || len(got.Policy.AllowedPaths) != 1 {
+	if got.Policy == nil || got.Policy.DefaultWorkingDir != "/home/me/projects" {
 		t.Fatalf("policy lost: %+v", got.Policy)
 	}
 }

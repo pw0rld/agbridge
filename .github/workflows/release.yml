@@ -10,7 +10,11 @@ on:
         required: true
 
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: validate
     name: build ${{ matrix.target.goos }}-${{ matrix.target.goarch }}
     runs-on: ubuntu-latest
     strategy:
@@ -20,6 +24,8 @@ jobs:
           - { goos: linux,  goarch: arm64 }
           - { goos: darwin, goarch: amd64 }
           - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,6 +50,7 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           out="agbridge-${GOOS}-${GOARCH}"
+          if [ "${GOOS}" = windows ]; then out="${out}.exe"; fi
           go build -trimpath -ldflags="-s -w -X main.agbridgeVersion=${TAG}" -o "${out}" ./cmd/agbridge
           ls -la "${out}"
           file "${out}" || true
@@ -52,7 +59,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
-          path: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          path: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}*
           if-no-files-found: error
           retention-days: 7
 
@@ -75,6 +82,7 @@ jobs:
       - name: include helper scripts
         run: |
           cp scripts/install.sh        dist/install.sh
+          cp scripts/install.ps1       dist/install.ps1
           cp scripts/gateway-setup.sh  dist/gateway-setup.sh
 
       - name: compute SHA256SUMS
@@ -83,7 +91,7 @@ jobs:
           ls -la
           # Hash all release assets (binaries + helper scripts) so users
           # can verify integrity for whichever they download.
-          sha256sum agbridge-* install.sh gateway-setup.sh > SHA256SUMS
+          sha256sum agbridge-* install.sh install.ps1 gateway-setup.sh > SHA256SUMS
           cat SHA256SUMS
 
       - name: resolve tag name
@@ -97,12 +105,24 @@ jobs:
             echo "name=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: find versioned release notes
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          notes=".github/release-notes/${TAG}.md"
+          if [ -f "${notes}" ]; then
+            echo "path=${notes}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             dist/agbridge-*
             dist/install.sh
+            dist/install.ps1
             dist/gateway-setup.sh
             dist/SHA256SUMS
           generate_release_notes: true

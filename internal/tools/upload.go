@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // UploadMaxBytes is the size cap for upload destinations. Much higher
@@ -29,13 +28,7 @@ const UploadHTTPTimeout = 5 * time.Minute
 // UploadChunks writes a file via bridge-supplied FileChunk frames.
 // Same atomic-temp+rename + sha256 semantics as WriteFile but caps at
 // UploadMaxBytes and validates optional ExpectedSha256.
-func UploadChunks(ctx context.Context, req fileproto.UploadRequest, allowedPaths []string, nextChunk ChunkSource) (fileproto.FileComplete, error) {
-	if _, ok := sandbox.PathAllowedResolved(req.DestPath, allowedPaths); !ok {
-		return fileproto.FileComplete{
-			Err:       "path_forbidden",
-			ErrDetail: "dest_path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}, nil
-	}
+func UploadChunks(ctx context.Context, req fileproto.UploadRequest, nextChunk ChunkSource) (fileproto.FileComplete, error) {
 	tmp, tmpPath, err := openUploadTemp(req.DestPath, req.Mode)
 	if err != nil {
 		return fileproto.FileComplete{Err: "tmp_create_failed", ErrDetail: err.Error()}, nil
@@ -80,13 +73,7 @@ func UploadChunks(ctx context.Context, req fileproto.UploadRequest, allowedPaths
 
 // UploadURL has the daemon fetch the URL and stream the body to the
 // destination. Bridge does not transfer the bytes. Supports HTTP/HTTPS.
-func UploadURL(ctx context.Context, req fileproto.UploadRequest, allowedPaths []string) (fileproto.FileComplete, error) {
-	if _, ok := sandbox.PathAllowedResolved(req.DestPath, allowedPaths); !ok {
-		return fileproto.FileComplete{
-			Err:       "path_forbidden",
-			ErrDetail: "dest_path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
-		}, nil
-	}
+func UploadURL(ctx context.Context, req fileproto.UploadRequest) (fileproto.FileComplete, error) {
 	if req.URL == "" {
 		return fileproto.FileComplete{Err: "bad_payload", ErrDetail: "url is required when source=url"}, nil
 	}

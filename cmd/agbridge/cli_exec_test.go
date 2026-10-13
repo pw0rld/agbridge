@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -17,9 +19,8 @@ import (
 func TestExecLiveAgainstFixture(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
-		ExecEnabled:     true,
-		AllowedExecCwds: []string{tmpDir, tmpDir + "/*"},
-		EnvAllowlist:    []string{"PATH"},
+		ExecEnabled:  true,
+		EnvAllowlist: []string{"PATH"},
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -45,9 +46,8 @@ func TestExecLiveAgainstFixture(t *testing.T) {
 func TestExecJSONShape(t *testing.T) {
 	tmpDir := t.TempDir()
 	env := setupPhase4(t, &config.DaemonConfig{
-		ExecEnabled:     true,
-		AllowedExecCwds: []string{tmpDir, tmpDir + "/*"},
-		EnvAllowlist:    []string{"PATH"},
+		ExecEnabled:  true,
+		EnvAllowlist: []string{"PATH"},
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -87,6 +87,37 @@ func TestExecJSONShape(t *testing.T) {
 	}
 	if sout, _ := got["stdout"].(string); !strings.Contains(sout, "ok") {
 		t.Errorf("stdout missing %q: %q", "ok", sout)
+	}
+}
+
+// TestExecDefaultsCwdToWorkingDir verifies that omitting --cwd falls
+// back to the CLI's bootstrapped working directory instead of leaving
+// cwd empty on the wire.
+func TestExecDefaultsCwdToWorkingDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	env := setupPhase4(t, &config.DaemonConfig{
+		ExecEnabled:       true,
+		EnvAllowlist:      []string{"PATH"},
+		DefaultWorkingDir: tmpDir,
+	})
+	dir := writeFixtureState(t, env)
+	g.stateDir = dir
+	defer func() { g.stateDir = "" }()
+	opts := env.newCLIOpts()
+	g.timeout = 5 * time.Second
+	defer func() { g.timeout = 0 }()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd := newExecCmd()
+	cmd.SetOut(&stdoutBuf)
+	cmd.SetErr(&stderrBuf)
+	cmd.SetContext(env.ctx)
+
+	if err := runExec(cmd, []string{"/bin/pwd"}, "", nil, 5000, opts); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.Contains(stdoutBuf.String(), tmpDir) {
+		t.Errorf("stdout missing cwd %q: %q", tmpDir, stdoutBuf.String())
 	}
 }
 

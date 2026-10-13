@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -73,9 +74,9 @@ type enrollOutcome struct {
 	DeviceID     string       `json:"device_id,omitempty"`
 	Role         string       `json:"role,omitempty"`
 	StatePath    string       `json:"state_path,omitempty"`
-	Service      string       `json:"service,omitempty"`       // installed unit name (daemon)
-	ServiceMode  string       `json:"service_mode,omitempty"`  // "system" | "user"
-	ServiceUser  string       `json:"service_user,omitempty"`  // system mode: the run-as account
+	Service      string       `json:"service,omitempty"`      // installed unit name (daemon)
+	ServiceMode  string       `json:"service_mode,omitempty"` // "system" | "user"
+	ServiceUser  string       `json:"service_user,omitempty"` // system mode: the run-as account
 	ServiceOK    bool         `json:"service_ok,omitempty"`
 	ServiceError string       `json:"service_error,omitempty"`
 	Steps        []enrollStep `json:"steps"`
@@ -233,6 +234,9 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 	if enrollResp.TargetDaemon == "" {
 		role = "daemon"
 	}
+	if runtime.GOOS == "windows" && role == "daemon" {
+		return fail("device_role", fmt.Errorf("Windows supports the CLI client only; create a bridge device and enroll with its token (this daemon token has already been exchanged)"))
+	}
 	report("token_exchange", true, fmt.Sprintf("device_id=%s role=%s", enrollResp.DeviceID, role), time.Since(t0))
 
 	// Decide how the daemon service will be installed (and thus where
@@ -254,6 +258,11 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 
 	// Stage 7: save state.json + key file
 	t0 = time.Now()
+	if svcPlan.System && svcPlan.User != nil {
+		if err := ensureNoSymlinkBelowHome(stateDir, svcPlan.User.Home); err != nil {
+			return fmt.Errorf("enroll: unsafe state dir: %w", err)
+		}
+	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		report("save_state", false, err.Error(), time.Since(t0))
 		return fail("save_state", err)
@@ -294,12 +303,10 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 			NoiseStaticKeyPath:   keyPath,
 			E2EMode:              enrollResp.E2EMode,
 			ExecEnabled:          enrollResp.ExecEnabled,
-			AllowedExecCwds:      enrollResp.AllowedExecCwds,
-			AllowedReadPaths:     enrollResp.AllowedReadPaths,
-			AllowedWritePaths:    enrollResp.AllowedWritePaths,
 			EnvAllowlist:         enrollResp.EnvAllowlist,
 			ForbiddenPorts:       enrollResp.ForbiddenPorts,
 			AllowedBridgePubkeys: enrollResp.AllowedBridgePubkeys,
+			DefaultWorkingDir:    enrollResp.DefaultWorkingDir,
 			EnrolledAt:           time.Now(),
 		}
 		if err := state.SaveDaemon(statePath, ds); err != nil {

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	"github.com/pw0rld/agbridge/internal/sandbox"
 )
 
 // matchLines returns the 1-indexed line numbers where needle starts within
@@ -62,23 +61,17 @@ func joinInts(xs []int, sep string) string {
 // larger than maxBytes returns exceeds_max_size before any read.
 //
 // Returned FileComplete uses these codes:
-//   path_forbidden, not_found, exceeds_max_size, bad_payload,
+//   not_found, exceeds_max_size, bad_payload,
 //   old_string_not_found, ambiguous_match, open_failed, read_failed,
 //   tmp_create_failed, write_failed, rename_failed, close_failed.
 //
 // Error (the Go return) is only set for ctx cancellation; everything
 // else is encoded in FileComplete.Err for the bridge to surface.
-func EditFile(ctx context.Context, req fileproto.FileEditRequest, allowedPaths []string, maxBytes int64) (fileproto.FileComplete, error) {
+func EditFile(ctx context.Context, req fileproto.FileEditRequest, maxBytes int64) (fileproto.FileComplete, error) {
 	if req.OldString == "" {
 		return fileproto.FileComplete{
 			Err:       "bad_payload",
 			ErrDetail: "old_string must not be empty (would match every position)",
-		}, nil
-	}
-	if _, ok := sandbox.PathAllowedResolved(req.Path, allowedPaths); !ok {
-		return fileproto.FileComplete{
-			Err:       "path_forbidden",
-			ErrDetail: "path not in allowed_write_paths; allowed: " + sandbox.FormatAllowlist(allowedPaths),
 		}, nil
 	}
 

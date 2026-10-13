@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -22,7 +24,7 @@ func TestWriteLiveAgainstFixture(t *testing.T) {
 	body := []byte("hello phase2 write\n")
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedWritePaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second
@@ -60,7 +62,7 @@ func TestWriteEmptyContent(t *testing.T) {
 	dst := filepath.Join(tmpDir, "empty.flag")
 
 	env := setupPhase4(t, &config.DaemonConfig{
-		AllowedWritePaths: []string{tmpDir, tmpDir + "/*"},
+		DefaultWorkingDir: tmpDir,
 	})
 	opts := env.newCLIOpts()
 	g.timeout = 5 * time.Second

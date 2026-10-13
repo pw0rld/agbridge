@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -204,5 +206,63 @@ func TestPlanDaemonServiceNonRootIsUserMode(t *testing.T) {
 	}
 	if p.StateDir != "/home/me/.config/agbridge" {
 		t.Fatalf("user-mode state dir changed: %q", p.StateDir)
+	}
+}
+
+func TestEnsureNoSymlinkBelowHomeCleanTree(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, ".config", "agbridge")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := ensureNoSymlinkBelowHome(stateDir, home); err != nil {
+		t.Fatalf("expected nil for clean real tree, got %v", err)
+	}
+}
+
+func TestEnsureNoSymlinkBelowHomeRejectsSymlinkComponent(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	link := filepath.Join(home, ".config")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatalf("setup symlink: %v", err)
+	}
+	stateDir := filepath.Join(home, ".config", "agbridge")
+	err := ensureNoSymlinkBelowHome(stateDir, home)
+	if err == nil {
+		t.Fatal("expected error for symlinked path component, got nil")
+	}
+	if !strings.Contains(err.Error(), link) {
+		t.Fatalf("error should mention the symlink path %q, got: %v", link, err)
+	}
+}
+
+func TestEnsureNoSymlinkBelowHomeIgnoresSymlinkAtOrAboveHome(t *testing.T) {
+	realHome := t.TempDir()
+	parent := t.TempDir()
+	homeLink := filepath.Join(parent, "home-link")
+	if err := os.Symlink(realHome, homeLink); err != nil {
+		t.Fatalf("setup symlink: %v", err)
+	}
+	stateDir := filepath.Join(homeLink, "x")
+	if err := os.MkdirAll(filepath.Join(realHome, "x"), 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := ensureNoSymlinkBelowHome(stateDir, homeLink); err != nil {
+		t.Fatalf("home itself being a symlink should not be checked, got %v", err)
+	}
+
+	// stateDir not under home at all → nil.
+	other := t.TempDir()
+	if err := ensureNoSymlinkBelowHome(other, realHome); err != nil {
+		t.Fatalf("stateDir outside home should be nil, got %v", err)
+	}
+}
+
+func TestEnsureNoSymlinkBelowHomeNonexistentTail(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, ".config", "agbridge")
+	if err := ensureNoSymlinkBelowHome(stateDir, home); err != nil {
+		t.Fatalf("nonexistent tail components should not error, got %v", err)
 	}
 }

@@ -10,13 +10,11 @@ type Capabilities struct {
 	DaemonName        string   `json:"daemon_name"`
 	DaemonHostname    string   `json:"daemon_hostname,omitempty"`
 	ExecEnabled       bool     `json:"exec_enabled"`
-	AllowedExecCwds   []string `json:"allowed_exec_cwds"`
-	AllowedReadPaths  []string `json:"allowed_read_paths"`
-	AllowedWritePaths []string `json:"allowed_write_paths"`
 	EnvAllowlist      []string `json:"env_allowlist,omitempty"`
 	ForbiddenPorts    []int    `json:"forbidden_ports,omitempty"`
 	MaxFileBytes      int64    `json:"max_file_bytes"`
 	AgbridgeVersion   string   `json:"agbridge_version,omitempty"`
+	DefaultWorkingDir string   `json:"default_working_dir,omitempty"`
 }
 
 func (c Capabilities) Encode() ([]byte, error) { return json.Marshal(c) }
