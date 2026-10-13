@@ -23,6 +23,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: shell installer platform selection
+        run: bash scripts/test-install.sh
+
       - name: go build (all packages)
         run: go build ./...
 
