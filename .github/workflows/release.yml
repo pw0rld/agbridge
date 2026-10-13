@@ -105,9 +105,20 @@ jobs:
             echo "name=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: find versioned release notes
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          notes=".github/release-notes/${TAG}.md"
+          if [ -f "${notes}" ]; then
+            echo "path=${notes}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             dist/agbridge-*
             dist/install.sh
