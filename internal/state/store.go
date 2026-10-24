@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/pw0rld/agbridge/internal/filelock"
 )
 
 // SaveBridge writes BridgeState to path atomically with 0600 perms.
@@ -16,6 +18,28 @@ func SaveDaemon(path string, s *DaemonState) error { return saveJSON(path, s) }
 
 // SaveGateway writes GatewayState atomically with 0600.
 func SaveGateway(path string, s *GatewayState) error { return saveJSON(path, s) }
+
+// MutateBridge serialises a load→modify→save cycle on a bridge state
+// file against sibling processes: concurrent CLI invocations (the core
+// agbridge scenario is several agents hammering one profile) would
+// otherwise lose updates — whoever saves last silently overwrites what
+// the others persisted. fn mutates the freshly-loaded state in place;
+// a non-nil error from fn aborts without saving.
+func MutateBridge(path string, fn func(*BridgeState) error) error {
+	lock, err := filelock.Acquire(path, filelock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	st, err := LoadBridge(path)
+	if err != nil {
+		return err
+	}
+	if err := fn(st); err != nil {
+		return err
+	}
+	return SaveBridge(path, st)
+}
 
 // LoadBridge reads + version-checks a bridge state file.
 func LoadBridge(path string) (*BridgeState, error) {

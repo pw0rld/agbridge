@@ -46,11 +46,21 @@ func ensureWorkingDir(ctx context.Context, opts cliclient.Options) (string, erro
 	if dwd == "" {
 		dwd = "/"
 	}
-	if st.WorkingDirs == nil {
-		st.WorkingDirs = map[string]string{}
-	}
-	st.WorkingDirs[opts.Target] = dwd
-	if err := state.SaveBridge(p, st); err != nil {
+	// Persist under the cross-process lock, re-checking inside: a
+	// sibling CLI may have bootstrapped (or cd'd) this target while we
+	// were on the network — its value wins over our fresh fetch.
+	err = state.MutateBridge(p, func(st *state.BridgeState) error {
+		if got := st.WorkingDirs[opts.Target]; got != "" {
+			dwd = got
+			return nil
+		}
+		if st.WorkingDirs == nil {
+			st.WorkingDirs = map[string]string{}
+		}
+		st.WorkingDirs[opts.Target] = dwd
+		return nil
+	})
+	if err != nil {
 		return "", err
 	}
 	return dwd, nil
@@ -75,15 +85,13 @@ func resolveArg(ctx context.Context, opts cliclient.Options, arg string) (string
 // (used by `cd`). Other targets are untouched.
 func setWorkingDir(target, dir string) error {
 	p := stateJSONPath(g.stateDir)
-	st, err := state.LoadBridge(p)
-	if err != nil {
-		return err
-	}
-	if st.WorkingDirs == nil {
-		st.WorkingDirs = map[string]string{}
-	}
-	st.WorkingDirs[target] = dir
-	return state.SaveBridge(p, st)
+	return state.MutateBridge(p, func(st *state.BridgeState) error {
+		if st.WorkingDirs == nil {
+			st.WorkingDirs = map[string]string{}
+		}
+		st.WorkingDirs[target] = dir
+		return nil
+	})
 }
 
 // fetchDefaultWorkingDir does one capabilities round-trip and returns the
