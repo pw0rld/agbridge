@@ -50,6 +50,28 @@ func TestFrameEncodeReqIDTooLong(t *testing.T) {
 	}
 }
 
+// reqid_len is a 2-byte field: exactly 65535 must round-trip, and 65536
+// must be rejected rather than overflowing uint16 to 0 and emitting a
+// corrupted frame (reqid_len 0 followed by 64 KiB of stray bytes).
+func TestFrameReqIDLengthBoundary(t *testing.T) {
+	max := Frame{Type: FrameTypePing, ReqID: strings.Repeat("x", 1<<16-1)}
+	enc, err := max.Encode()
+	if err != nil {
+		t.Fatalf("Encode(65535): %v", err)
+	}
+	got, err := Decode(enc)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.ReqID != max.ReqID {
+		t.Errorf("reqid round-trip mismatch: len %d", len(got.ReqID))
+	}
+	over := Frame{Type: FrameTypePing, ReqID: strings.Repeat("x", 1<<16)}
+	if _, err := over.Encode(); !errors.Is(err, ErrReqIDTooLong) {
+		t.Errorf("Encode(65536): got %v, want ErrReqIDTooLong", err)
+	}
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	orig := Frame{Type: FrameTypePong, ReqID: "xyz", Payload: []byte("world")}
 	encoded, err := orig.Encode()

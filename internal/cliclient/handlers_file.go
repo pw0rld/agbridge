@@ -303,8 +303,13 @@ type pathOnlyArgs struct {
 }
 
 // StatHandler returns metadata for a single path on the daemon.
+// Args accept an optional follow=true to resolve a final symlink
+// (used by `cd` so symlinked directories pass the is-dir check).
 func (r *Router) StatHandler(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args pathOnlyArgs
+	var args struct {
+		Path   string `json:"path"`
+		Follow bool   `json:"follow,omitempty"`
+	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 	}
@@ -312,7 +317,7 @@ func (r *Router) StatHandler(ctx context.Context, raw json.RawMessage) (any, err
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
 	reqID := newReqID()
-	reqJSON, _ := fsproto.StatRequest{Path: args.Path}.Encode()
+	reqJSON, _ := fsproto.StatRequest{Path: args.Path, Follow: args.Follow}.Encode()
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 

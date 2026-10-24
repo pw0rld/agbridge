@@ -94,7 +94,9 @@ func runCd(cmd *cobra.Command, arg string, opts cliclient.Options) error {
 // statIsDir stats target on the daemon and returns nil iff it is a directory.
 func statIsDir(ctx context.Context, opts cliclient.Options, target string) error {
 	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{"path": target})
+		// follow=true: a symlink pointing at a directory is a valid cd
+		// target; only the resolved target's type matters here.
+		argsJSON, _ := json.Marshal(map[string]any{"path": target, "follow": true})
 		return c.Router().StatHandler(ctx, argsJSON)
 	})
 	if err != nil {

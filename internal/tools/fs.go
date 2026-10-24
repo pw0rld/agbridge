@@ -45,9 +45,15 @@ func ListDirectory(req fsproto.ListDirRequest) fsproto.ListDirResponse {
 	return fsproto.ListDirResponse{Entries: entries}
 }
 
-// Stat returns metadata for a single path.
+// Stat returns metadata for a single path. By default the link itself is
+// described (lstat); with req.Follow the final path component is resolved
+// (stat), so a symlink to a directory reports type "dir".
 func Stat(req fsproto.StatRequest) fsproto.StatResponse {
-	info, err := os.Lstat(req.Path)
+	stat := os.Lstat
+	if req.Follow {
+		stat = os.Stat
+	}
+	info, err := stat(req.Path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fsproto.StatResponse{Err: "not_found"}

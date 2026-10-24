@@ -12,12 +12,14 @@ import (
 const ProtocolVersion uint8 = 1
 
 const (
-	maxReqIDLen   = 1 << 16
-	maxPayloadLen = 1 << 26 // 64 MB
+	// maxReqIDLen must fit the 2-byte reqid_len wire field: 1<<16 would
+	// overflow uint16 to 0 and emit a corrupted frame.
+	maxReqIDLen   = 1<<16 - 1 // 65535
+	maxPayloadLen = 1 << 26   // 64 MB
 )
 
 var (
-	ErrReqIDTooLong    = errors.New("proto: reqid exceeds 64 KB")
+	ErrReqIDTooLong    = errors.New("proto: reqid exceeds 65535 bytes")
 	ErrPayloadTooLong  = errors.New("proto: payload exceeds 64 MB")
 	ErrShortFrame      = errors.New("proto: frame truncated")
 	ErrVersionMismatch = errors.New("proto: protocol version mismatch")

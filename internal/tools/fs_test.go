@@ -73,6 +73,40 @@ func TestStatHappyPath(t *testing.T) {
 	}
 }
 
+func TestStatFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default (no follow): the link itself is described.
+	resp := Stat(fsproto.StatRequest{Path: link})
+	if resp.Err != "" || resp.Entry == nil || resp.Entry.Type != "symlink" {
+		t.Errorf("no-follow: err=%q entry=%+v, want type symlink", resp.Err, resp.Entry)
+	}
+
+	// follow=true: a symlink to a directory reports as dir (cd accepts it).
+	resp = Stat(fsproto.StatRequest{Path: link, Follow: true})
+	if resp.Err != "" || resp.Entry == nil || resp.Entry.Type != "dir" {
+		t.Errorf("follow: err=%q entry=%+v, want type dir", resp.Err, resp.Entry)
+	}
+
+	// follow=true on a dangling link surfaces not_found.
+	resp = Stat(fsproto.StatRequest{Path: dangling, Follow: true})
+	if resp.Err != "not_found" || resp.Entry != nil {
+		t.Errorf("dangling follow: err=%q entry=%+v, want not_found", resp.Err, resp.Entry)
+	}
+}
+
 func TestStatNotFound(t *testing.T) {
 	dir := t.TempDir()
 	resp := Stat(fsproto.StatRequest{Path: filepath.Join(dir, "no")})
