@@ -223,8 +223,21 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	// replace-race hang the single writer slot used to cause).
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Daemon→bridge frames ride a bounded queue drained by a dedicated
+	// sender goroutine: Deliver runs in the daemon's read loop, so a
+	// synchronous conn write here lets one stalled bridge head-of-line
+	// block every other subscriber of that daemon (and its control
+	// traffic). Overflow severs this session rather than dropping
+	// frames — dropped frames would corrupt E2E nonce ordering.
+	sendQ := newFrameQueue(bridgeCtx, c.Send)
 	sub := proxy.Subscribe(h.Name, func(_ context.Context, f proto.Frame) error {
-		return c.Send(bridgeCtx, f)
+		if err := sendQ.submit(f); err != nil {
+			cancel()      // stop the sender goroutine
+			_ = c.Close() // wake the bridge→daemon loop; its defers unsubscribe & release
+			_ = aud.Append(map[string]any{"event": "bridge_queue_overflow", "agent": h.Name, "target": h.TargetDaemon})
+			return err
+		}
+		return nil
 	})
 	defer proxy.Unsubscribe(sub)
 
