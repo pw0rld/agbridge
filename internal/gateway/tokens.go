@@ -73,6 +73,54 @@ func NewTokenStore(path string) (*TokenStore, error) {
 	return s, nil
 }
 
+// fileLock is a held cross-process lock on <path>.lock. The data file
+// itself cannot carry the lock because flushLocked replaces it via
+// rename (lock owners would end up flock'd on an orphaned inode).
+type fileLock struct {
+	f *os.File
+}
+
+// crossLock serialises the reload→mutate→flush sequences against
+// sibling processes (CLI issue-token vs the running gateway). Without
+// it, a store that reloaded before a sibling's flush writes back a
+// stale map and resurrects tokens the sibling already consumed —
+// double-spend of a one-shot credential. Bounded wait so a wedged
+// holder cannot block enrollment forever.
+func (s *TokenStore) crossLock() (*fileLock, error) {
+	dir := filepath.Dir(s.path)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+	f, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("tokens: open lockfile: %w", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ok, err := tryLockTokenFile(f)
+		if err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("tokens: lock: %w", err)
+		}
+		if ok {
+			return &fileLock{f: f}, nil
+		}
+		if time.Now().After(deadline) {
+			_ = f.Close()
+			return nil, errors.New("tokens: timed out waiting for token lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (l *fileLock) Release() {
+	if l == nil {
+		return
+	}
+	unlockTokenFile(l.f)
+	_ = l.f.Close()
+}
+
 // Issue creates and persists a new token.
 func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 	if req.Role != "bridge" && req.Role != "daemon" {
@@ -110,14 +158,18 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 		Policy:    req.Policy,
 		ExpiresAt: time.Now().Add(req.TTL),
 	}
+	lock, err := s.crossLock()
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	// Pull in any tokens issued by a sibling process (e.g. CLI vs running
 	// gateway). The single tokens.json file is the source of truth.
 	_ = s.reloadLocked()
 	s.toks[tok.Token] = tok
-	err := s.flushLocked()
-	s.mu.Unlock()
-	if err != nil {
+	if err := s.flushLocked(); err != nil {
 		return nil, err
 	}
 	return tok, nil
@@ -126,6 +178,11 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 // Consume validates and marks a token used. Caller must call once.
 // Subsequent calls with the same token return an error.
 func (s *TokenStore) Consume(t string) (*Token, error) {
+	lock, err := s.crossLock()
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Tokens may have been issued by a sibling process (the CLI
@@ -174,8 +231,16 @@ func (s *TokenStore) reloadLocked() error {
 
 // GC removes used + expired tokens older than retention.
 func (s *TokenStore) GC(retention time.Duration) error {
+	lock, err := s.crossLock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// GC flushes the whole map too, so it must not run on a snapshot a
+	// sibling has since advanced (would resurrect fresh/consumed tokens).
+	_ = s.reloadLocked()
 	cutoff := time.Now().Add(-retention)
 	for k, t := range s.toks {
 		if t.Used && t.UsedAt.Before(cutoff) {
