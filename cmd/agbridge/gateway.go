@@ -111,6 +111,16 @@ func newGatewayCmd() *cobra.Command {
 			enrollSrv.SetLive(inst.Creds)
 			fmt.Fprintf(os.Stderr, "gateway listening on %s (enroll endpoint at /v1/enroll)\n", inst.Addr)
 
+			// Optional Prometheus endpoint. Unauthenticated plain HTTP,
+			// so it only exists when the operator opts in via
+			// metrics_listen (bind to localhost / mgmt network only).
+			if cfg.MetricsListen != "" {
+				if _, err := gateway.ServeMetrics(ctx, cfg.MetricsListen, inst.Metrics); err != nil {
+					return fmt.Errorf("metrics listener: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "gateway metrics on http://%s/metrics\n", cfg.MetricsListen)
+			}
+
 			hupCh := make(chan os.Signal, 1)
 			signal.Notify(hupCh, syscall.SIGHUP)
 			defer signal.Stop(hupCh)

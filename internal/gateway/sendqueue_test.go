@@ -15,7 +15,7 @@ func TestFrameQueueDeliversInOrder(t *testing.T) {
 	q := newFrameQueue(ctx, func(_ context.Context, f proto.Frame) error {
 		got <- f.ReqID
 		return nil
-	})
+	}, nil)
 	for _, id := range []string{"1", "2", "3", "4", "5"} {
 		if err := q.submit(proto.Frame{ReqID: id}); err != nil {
 			t.Fatalf("submit %s: %v", id, err)
@@ -43,7 +43,7 @@ func TestFrameQueueOverflowFailsFast(t *testing.T) {
 	q := newFrameQueue(ctx, func(ctx context.Context, _ proto.Frame) error {
 		<-ctx.Done() // sender blocks on the first frame until cancel
 		return ctx.Err()
-	})
+	}, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -73,7 +73,7 @@ func TestFrameQueueByteBound(t *testing.T) {
 	q := newFrameQueue(ctx, func(ctx context.Context, _ proto.Frame) error {
 		<-ctx.Done()
 		return ctx.Err()
-	})
+	}, nil)
 	if err := q.submit(proto.Frame{Payload: make([]byte, bridgeQueueMaxBytes)}); err != nil {
 		t.Fatalf("first big frame: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestFrameQueueByteBound(t *testing.T) {
 
 func TestFrameQueueSubmitAfterCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	q := newFrameQueue(ctx, func(_ context.Context, _ proto.Frame) error { return nil })
+	q := newFrameQueue(ctx, func(_ context.Context, _ proto.Frame) error { return nil }, nil)
 	cancel()
 	// Give the sender a moment to exit; submit must reject regardless.
 	time.Sleep(20 * time.Millisecond)
@@ -108,7 +108,7 @@ func TestDeliverDoesNotBlockBehindSlowBridge(t *testing.T) {
 	slow := newFrameQueue(ctx, func(ctx context.Context, _ proto.Frame) error {
 		<-ctx.Done() // this bridge's conn never drains
 		return ctx.Err()
-	})
+	}, nil)
 	p.Subscribe("slow", func(_ context.Context, f proto.Frame) error { return slow.submit(f) })
 
 	fast := make(chan struct{}, bridgeQueueDepth+16)

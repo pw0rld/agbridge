@@ -74,12 +74,19 @@ func runGet(cmd *cobra.Command, remotePath, localPath string, opts cliclient.Opt
 	sha, _ := meta["sha256"].(string)
 
 	if g.json {
-		printJSON(cmd.OutOrStdout(), map[string]any{
+		out := map[string]any{
 			"remote": remotePath,
 			"local":  localPath,
 			"size":   size,
 			"sha256": sha,
-		})
+		}
+		// Pass through the segment count when the transfer was served
+		// by the parallel segmented downloader (size >= 16 MiB), so
+		// scripts can verify which path ran.
+		if seg, ok := meta["segments"]; ok {
+			out["segments"] = seg
+		}
+		printJSON(cmd.OutOrStdout(), out)
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "downloaded %d bytes to %s (sha256=%s)\n", size, localPath, sha)
