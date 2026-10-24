@@ -12,6 +12,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport/wss"
 )
@@ -63,6 +64,11 @@ func (d *binaryDaemon) loop(ctx context.Context, srv *wss.Conn, inner proto.Fram
 			return
 		}
 		d.collect(srv, inner.ReqID, c, false)
+	case proto.FrameTypeStatRequest:
+		// Advertise a tiny file: below parallelDownloadThreshold, so
+		// the downloads under test stay on the sequential path.
+		p, _ := fsproto.StatResponse{Entry: &fsproto.DirEntry{Type: "file", Size: 7}}.Encode()
+		sendRoute(d.t, srv, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: p})
 	case proto.FrameTypeDownloadRequest:
 		req, err := fileproto.DecodeDownloadRequest(inner.Payload)
 		if err != nil {

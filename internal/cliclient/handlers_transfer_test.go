@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/proto"
 	"github.com/pw0rld/agbridge/internal/transport"
 	"github.com/pw0rld/agbridge/internal/transport/testcerts"
@@ -59,8 +60,10 @@ func connPair(t *testing.T) (client, server *wss.Conn) {
 }
 
 // downloadFixture builds a disabled-e2e Router on a fresh conn pair plus
-// a fake daemon that reads the DownloadRequest and runs script(reqID).
-func downloadFixture(t *testing.T, script func(ctx context.Context, srv *wss.Conn, reqID string)) (*Router, context.Context, context.CancelFunc) {
+// a fake daemon that answers size probes with statSize (below
+// parallelDownloadThreshold keeps tests on the sequential path) and runs
+// script(reqID) for every DownloadRequest that arrives.
+func downloadFixture(t *testing.T, statSize int64, script func(ctx context.Context, srv *wss.Conn, reqID string)) (*Router, context.Context, context.CancelFunc) {
 	t.Helper()
 	client, server := connPair(t)
 	key := []byte("testkey")
@@ -69,19 +72,27 @@ func downloadFixture(t *testing.T, script func(ctx context.Context, srv *wss.Con
 	go r.runReader()
 
 	go func() {
-		f, err := server.Recv(ctx)
-		if err != nil {
-			return
+		for {
+			f, err := server.Recv(ctx)
+			if err != nil {
+				return
+			}
+			plain, err := auth.VerifyFrame(key, f.Payload)
+			if err != nil {
+				return
+			}
+			inner, err := proto.Decode(plain)
+			if err != nil {
+				return
+			}
+			switch inner.Type {
+			case proto.FrameTypeStatRequest:
+				p, _ := fsproto.StatResponse{Entry: &fsproto.DirEntry{Type: "file", Size: statSize}}.Encode()
+				sendRoute(t, server, proto.Frame{Type: proto.FrameTypeStatResponse, ReqID: inner.ReqID, Payload: p})
+			case proto.FrameTypeDownloadRequest:
+				script(ctx, server, inner.ReqID)
+			}
 		}
-		plain, err := auth.VerifyFrame(key, f.Payload)
-		if err != nil {
-			return
-		}
-		inner, err := proto.Decode(plain)
-		if err != nil || inner.Type != proto.FrameTypeDownloadRequest {
-			return
-		}
-		script(ctx, server, inner.ReqID)
 	}()
 	return r, ctx, cancel
 }
@@ -140,7 +151,7 @@ func TestDownloadToDestCommitsAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, ctx, cancel := downloadFixture(t, func(ctx context.Context, srv *wss.Conn, reqID string) {
+	r, ctx, cancel := downloadFixture(t, 7, func(ctx context.Context, srv *wss.Conn, reqID string) {
 		sendChunk(t, srv, reqID, []byte("NEW"), false)
 		sendChunk(t, srv, reqID, []byte("DATA"), true)
 		p, _ := fileproto.FileComplete{Size: 7, Sha256: "aa"}.Encode()
@@ -176,7 +187,7 @@ func TestDownloadErrorKeepsExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, ctx, cancel := downloadFixture(t, func(ctx context.Context, srv *wss.Conn, reqID string) {
+	r, ctx, cancel := downloadFixture(t, 7, func(ctx context.Context, srv *wss.Conn, reqID string) {
 		sendChunk(t, srv, reqID, []byte("PARTIAL"), false)
 		p, _ := fileproto.FileComplete{Err: "read_failed", ErrDetail: "disk"}.Encode()
 		sendRoute(t, srv, proto.Frame{Type: proto.FrameTypeFileComplete, ReqID: reqID, Payload: p})
@@ -207,7 +218,7 @@ func TestDownloadCancelKeepsExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, ctx, cancel := downloadFixture(t, func(ctx context.Context, srv *wss.Conn, reqID string) {
+	r, ctx, cancel := downloadFixture(t, 7, func(ctx context.Context, srv *wss.Conn, reqID string) {
 		sendChunk(t, srv, reqID, []byte("PART"), false)
 		// then go silent forever — the test cancels ctx
 		<-ctx.Done()

@@ -2,17 +2,39 @@ package cliclient
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/proto"
+)
+
+// Whole-file downloads to dest_path of at least this size are fetched as
+// concurrent offset-range segments instead of one sequential stream.
+// var (not const) so tests can lower it; do not mutate at runtime in
+// production (same convention as maxBufferedOutput).
+var parallelDownloadThreshold int64 = 16 << 20
+
+// Segment sizing: aim for ~8 MiB per segment, clamped to [2, 4]
+// segments. More parallelism would help marginally but multiplies the
+// daemon-side open files and gateway frame interleaving for little
+// gain on typical WAN links.
+const (
+	parallelSegmentTarget = int64(8 << 20)
+	parallelSegmentsMin   = 2
+	parallelSegmentsMax   = 4
 )
 
 // finalizeTempDownload chmods and closes the streamed temp file, then
@@ -219,6 +241,26 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 	if args.SrcPath == "" {
 		return mcpErrorResult(errcode.New("bad_payload", "src_path required")), nil
 	}
+
+	// Whole-file fetch to local disk: try a segmented parallel fetch for
+	// large files. Offset/Limit are already in the protocol and the
+	// daemon serves each download request on its own goroutine, so
+	// segments are just concurrent downloads — no capability probe
+	// needed (every daemon since phase 4 honors Offset/Limit, and both
+	// chunk encodings are accepted on receive). Any miss — stat
+	// failure, small file, or a failed segment — falls through to the
+	// sequential path below, which then reports the authoritative
+	// error to the user. The extra stat costs one small RTT on the
+	// dest_path path only; inline (no dest_path) reads are small by
+	// construction and never stat.
+	if args.DestPath != "" && args.Offset == 0 && args.Limit == 0 {
+		if size, ok := r.statRemoteSize(ctx, args.SrcPath); ok && size >= parallelDownloadThreshold {
+			if res, perr := r.downloadParallel(ctx, args, size); perr == nil {
+				return res, nil
+			}
+		}
+	}
+
 	reqID := newReqID()
 	// Binary=true is always requested: an old daemon ignores the unknown
 	// field and replies with JSON chunks, which the loop below accepts
@@ -338,6 +380,204 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 					msg = msg + " (" + detail + ")"
 				}
 				return mcpErrorResult(errcode.New(code, msg)), nil
+			}
+		}
+	}
+}
+
+// statRemoteSize asks the daemon for the size of path. ok=false on any
+// miss — missing file, non-file type, unexpected reply, transport
+// error — because the caller only needs "large file worth
+// parallelizing?"; the sequential path stays the authority that
+// surfaces the real error to the user.
+func (r *Router) statRemoteSize(ctx context.Context, path string) (int64, bool) {
+	reqID := newReqID()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	payload, err := fsproto.StatRequest{Path: path}.Encode()
+	if err != nil {
+		return 0, false
+	}
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeStatRequest, ReqID: reqID, Payload: payload}); err != nil {
+		return 0, false
+	}
+	select {
+	case <-ctx.Done():
+		return 0, false
+	case f, ok := <-ch:
+		if !ok {
+			return 0, false
+		}
+		if f.Type != proto.FrameTypeStatResponse {
+			return 0, false
+		}
+		resp, err := fsproto.DecodeStatResponse(f.Payload)
+		if err != nil || resp.Err != "" || resp.Entry == nil || resp.Entry.Type != "file" {
+			return 0, false
+		}
+		return resp.Entry.Size, true
+	}
+}
+
+// segmentError formats a daemon-side segment failure like the other
+// transfer paths do ("context (detail)" when a detail is present).
+func segmentError(code, detail string) error {
+	msg := "download segment: " + code
+	if detail != "" {
+		msg = msg + " (" + detail + ")"
+	}
+	return errors.New(msg)
+}
+
+// downloadParallel fetches the first size bytes of args.SrcPath as
+// concurrent offset-range segments assembled straight into the dest
+// temp file. The Router demultiplexes replies by reqID and sendMu
+// serializes frame writes, so segments are ordinary concurrent
+// DownloadRequests — no protocol or gateway change. WriteAt keeps the
+// assembly order-independent; the whole-file sha256 is computed
+// locally because each segment's FileComplete digest only covers its
+// own range (a mid-transfer file rewrite can therefore produce a
+// first-size-bytes snapshot; the sequential path has comparable
+// best-effort semantics). On any error the temp file is removed, dest
+// is left untouched, and the caller falls back to sequential.
+func (r *Router) downloadParallel(ctx context.Context, args downloadArgs, size int64) (any, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(args.DestPath), "."+filepath.Base(args.DestPath)+".agbridge-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}
+
+	n := int(size / parallelSegmentTarget)
+	if n < parallelSegmentsMin {
+		n = parallelSegmentsMin
+	}
+	if n > parallelSegmentsMax {
+		n = parallelSegmentsMax
+	}
+	base := size / int64(n)
+
+	var (
+		wg       sync.WaitGroup
+		errOnce  sync.Once
+		firstErr error
+		received atomic.Int64
+	)
+	fail := func(err error) {
+		errOnce.Do(func() { firstErr = err })
+	}
+	emit := EmitterFromContext(ctx)
+
+	for i := 0; i < n; i++ {
+		off := int64(i) * base
+		ln := base
+		if i == n-1 {
+			ln = size - off // last segment absorbs the division remainder
+		}
+		wg.Add(1)
+		go func(off, ln int64) {
+			defer wg.Done()
+			if err := r.downloadSegment(ctx, args.SrcPath, off, ln, tmp, &received, emit); err != nil {
+				fail(err)
+			}
+		}(off, ln)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		cleanup()
+		return nil, firstErr
+	}
+
+	// Whole-file digest over the assembled bytes (segments' own digests
+	// are per-range and not composable).
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(tmp, 0, size)); err != nil {
+		cleanup()
+		return nil, err
+	}
+	sha := hex.EncodeToString(h.Sum(nil))
+
+	if err := finalizeTempDownload(tmp, args.DestPath); err != nil {
+		// finalizeTempDownload closes tmp on every error path; only the
+		// leftover file needs removing.
+		_ = os.Remove(tmp.Name())
+		return nil, err
+	}
+	meta := map[string]any{
+		"size":      size,
+		"sha256":    sha,
+		"src_path":  args.SrcPath,
+		"dest_path": args.DestPath,
+		"segments":  n,
+	}
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text",
+			"text": fmt.Sprintf("downloaded %d bytes to %s (sha256=%s, %d segments)", size, args.DestPath, sha, n)}},
+		"_meta": meta,
+	}, nil
+}
+
+// downloadSegment fetches [off, off+ln) of srcPath and places each
+// chunk at its absolute offset with WriteAt. Completion is accepted
+// only on a clean FileComplete whose byte count matches the request: a
+// daemon that served fewer bytes (the file shrank mid-transfer) is an
+// error, not a silently truncated result.
+func (r *Router) downloadSegment(ctx context.Context, srcPath string, off, ln int64, tmp *os.File, received *atomic.Int64, emit ProgressEmitter) error {
+	reqID := newReqID()
+	ch := r.registerCall(reqID)
+	defer r.unregisterCall(reqID)
+
+	reqJSON, _ := fileproto.DownloadRequest{SrcPath: srcPath, Offset: off, Limit: ln, Binary: true}.Encode()
+	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeDownloadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
+		return err
+	}
+	var written int64
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case fr, ok := <-ch:
+			if !ok {
+				return errors.New("cliclient: connection reset during parallel download")
+			}
+			switch fr.Type {
+			case proto.FrameTypeFileChunk, proto.FrameTypeFileChunkBin:
+				c, err := decodeChunk(fr.Type, fr.Payload)
+				if err != nil {
+					return err
+				}
+				if len(c.Data) == 0 {
+					continue // EOF sentinel
+				}
+				if written+int64(len(c.Data)) > ln {
+					// Over-delivery would overwrite the neighbouring
+					// segment's region — treat as protocol error.
+					return fmt.Errorf("cliclient: segment %d..%d over-delivered %d bytes", off, off+ln, written+int64(len(c.Data)))
+				}
+				if _, err := tmp.WriteAt(c.Data, off+written); err != nil {
+					return err
+				}
+				written += int64(len(c.Data))
+				emit(float64(received.Add(int64(len(c.Data)))), nil, "")
+			case proto.FrameTypeFileComplete:
+				c, err := fileproto.DecodeFileComplete(fr.Payload)
+				if err != nil {
+					return err
+				}
+				if c.Err != "" {
+					return segmentError(c.Err, c.ErrDetail)
+				}
+				if c.Size != written || written != ln {
+					return fmt.Errorf("cliclient: segment %d..%d got %d bytes (complete says %d)", off, off+ln, written, c.Size)
+				}
+				return nil
+			case proto.FrameTypeError:
+				code, detail := errcode.DecodeFramePayload(fr.Payload)
+				return segmentError(code, detail)
 			}
 		}
 	}
