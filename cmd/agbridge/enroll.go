@@ -118,6 +118,9 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 		outcome.Error = err.Error()
 		if emitJSON {
 			_ = json.NewEncoder(stdout).Encode(outcome)
+			// The envelope is already on stdout; keep cliMain from
+			// adding a second JSON object.
+			return jsonError{fmt.Errorf("%s: %w", stage, err)}
 		}
 		return fmt.Errorf("%s: %w", stage, err)
 	}
