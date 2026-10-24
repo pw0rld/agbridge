@@ -43,9 +43,14 @@ maintainers will handle the rest.
 
 In scope (please report):
 
-- **Bypass of `allowed_read_paths` / `allowed_write_paths` /
-  `allowed_exec_cwds`.** Any way to make the daemon access a file
-  or directory outside its configured allowlist.
+- **Bypass of the daemon execution boundary.** Since v0.0.4 the
+  working directory is a soft base, not a fence, and the daemon
+  enforces no path allowlist; the real boundaries are the daemon's
+  OS user, the Noise identity (`allowed_bridge_pubkeys`), and the
+  e2e channel. Report any way to make the daemon run something its
+  own config forbids (`exec` with `exec_enabled=false`, a tool
+  called with e2e disabled when required, a gateway-relayed frame
+  reaching dispatch without passing the Noise session, etc.).
 - **Bypass of `allowed_bridge_pubkeys`.** Any way to make a daemon
   accept a Noise handshake from a pubkey not on its list.
 - **Bypass of `forbidden_ports`.** Any way to make port-forward
