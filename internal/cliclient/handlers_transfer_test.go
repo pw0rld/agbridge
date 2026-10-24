@@ -68,7 +68,7 @@ func downloadFixture(t *testing.T, statSize int64, script func(ctx context.Conte
 	client, server := connPair(t)
 	key := []byte("testkey")
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]chan proto.Frame)}
+	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]*pendingCall)}
 	go r.runReader()
 
 	go func() {

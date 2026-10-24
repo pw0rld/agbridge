@@ -116,7 +116,7 @@ func chunkFixture(t *testing.T, advertise bool) (*Router, context.Context, conte
 	client, server := connPair(t)
 	key := []byte("testkey")
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]chan proto.Frame)}
+	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]*pendingCall)}
 	go r.runReader()
 	d := &binaryDaemon{t: t, advertise: advertise}
 	go func() {

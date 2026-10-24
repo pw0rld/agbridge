@@ -84,21 +84,19 @@ func runStat(cmd *cobra.Command, path string, opts cliclient.Options) error {
 	return nil
 }
 
-// extractStatEntry pulls the typed *fsproto.DirEntry from the handler
-// _meta envelope. StatHandler stores the pointer directly.
+// extractStatEntry pulls the DirEntry out of the handler _meta
+// envelope. StatHandler stores the typed pointer directly on the
+// classic one-shot path; when the response travels through the agent
+// broker it takes a JSON hop and the entry arrives as a plain map, so
+// both shapes must be accepted (see cli_coerce.go).
 func extractStatEntry(res map[string]any) (fsproto.DirEntry, bool) {
 	meta, ok := res["_meta"].(map[string]any)
 	if !ok {
 		return fsproto.DirEntry{}, false
 	}
-	switch e := meta["entry"].(type) {
-	case *fsproto.DirEntry:
-		if e == nil {
-			return fsproto.DirEntry{}, false
-		}
-		return *e, true
-	case fsproto.DirEntry:
-		return e, true
+	entry, ok := coerceDirEntry(meta["entry"])
+	if !ok || entry == nil {
+		return fsproto.DirEntry{}, false
 	}
-	return fsproto.DirEntry{}, false
+	return *entry, true
 }

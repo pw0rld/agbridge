@@ -103,7 +103,7 @@ func segFixture(t *testing.T, blob []byte) (*Router, context.Context, context.Ca
 	client, server := connPair(t)
 	key := []byte("testkey")
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]chan proto.Frame)}
+	r := &Router{ctx: ctx, conn: client, apiKey: key, e2eMode: "disabled", pending: make(map[string]*pendingCall)}
 	go r.runReader()
 	d := &segDaemon{t: t, blob: blob}
 	go func() {

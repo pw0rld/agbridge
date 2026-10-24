@@ -19,6 +19,8 @@ import (
 	"os"
 	"sync/atomic"
 	"time"
+
+	"github.com/pw0rld/agbridge/internal/filelock"
 )
 
 // DefaultConnectTimeout bounds the CLI-side socket connect. The socket
@@ -145,6 +147,11 @@ type ServerOptions struct {
 	OnIdle func(lastActivity time.Time) error
 }
 
+// agentLockTimeout bounds how long Serve waits for the single-instance
+// lock. A second `agbridge agent` on the same socket should fail fast
+// with a clear message instead of silently stealing the path.
+const agentLockTimeout = 2 * time.Second
+
 // Serve listens on socketPath (created 0600 inside a 0700 dir),
 // serving one request per line until ctx cancels. Multiple concurrent
 // connections are handled independently. On return (error or ctx
@@ -153,28 +160,54 @@ func Serve(ctx context.Context, socketPath string, h Handler, opts ServerOptions
 	if err := os.MkdirAll(dirOf(socketPath), 0o700); err != nil {
 		return fmt.Errorf("agentsock: mkdir: %w", err)
 	}
-	// Stale socket from a crashed agent: try to unlink once.
-	if _, err := os.Stat(socketPath); err == nil {
-		_ = os.Remove(socketPath)
+	// Single-instance guard. "If the path exists, unlink it" cannot tell
+	// a live agent from a crashed one, so two agents would steal each
+	// other's socket — and the loser's path-based os.Remove on exit
+	// would delete the winner's socket, leaving the CLI to silently
+	// fall back to one-shot dials. The sidecar lock settles it: holding
+	// it proves nobody is serving, which is also what makes the stale
+	// cleanup below safe.
+	lock, err := filelock.Acquire(socketPath+".lock", agentLockTimeout)
+	if err != nil {
+		return fmt.Errorf("agentsock: another agent already serves %s: %w", socketPath, err)
 	}
-	ucaddr := &net.UnixAddr{Name: socketPath, Net: "unix"}
-	ln, err := net.ListenUnix("unix", ucaddr)
+	defer lock.Release()
+	_ = os.Remove(socketPath) // stale: we own the path
+
+	// Bind to a private temporary name, tighten the mode, then rename
+	// onto the public path. Binding directly would expose the socket as
+	// 0777&^umask (0775 under a typical umask 002) until the chmod
+	// landed, letting a same-group user connect and borrow our
+	// credentials for the duration of that window.
+	tmpPath := fmt.Sprintf("%s.%d.tmp", socketPath, os.Getpid())
+	_ = os.Remove(tmpPath)
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: tmpPath, Net: "unix"})
 	if err != nil {
 		return fmt.Errorf("agentsock: listen: %w", err)
 	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	cleanup := func() {
 		_ = ln.Close()
+		_ = os.Remove(tmpPath)
 		_ = os.Remove(socketPath)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		cleanup()
 		return fmt.Errorf("agentsock: chmod: %w", err)
 	}
-	defer func() {
-		_ = ln.Close()
-		_ = os.Remove(socketPath)
-	}()
+	if err := os.Rename(tmpPath, socketPath); err != nil {
+		cleanup()
+		return fmt.Errorf("agentsock: publish socket: %w", err)
+	}
+	defer cleanup()
 
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+		case <-stop:
+		}
 	}()
 
 	var lastActivityUnix atomic.Int64
