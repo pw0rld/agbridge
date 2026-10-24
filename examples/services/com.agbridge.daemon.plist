@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- agbridge daemon (macOS LaunchAgent). Replace __EXE__, __STATE_DIR__
+     (see README.md for the sed one-liner), then load with:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agbridge.daemon.plist
+     plists do NOT expand ~ or $VARs — absolute paths only. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agbridge.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__EXE__</string>
+    <string>daemon</string>
+    <string>--state-dir</string>
+    <string>__STATE_DIR__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/daemon.err.log</string>
+</dict>
+</plist>

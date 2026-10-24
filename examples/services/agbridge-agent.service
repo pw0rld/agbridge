@@ -1,0 +1,37 @@
+# agbridge agent broker — systemd USER unit.
+# Runs on the CONTROL machine (where the CLI is invoked), not the
+# remote box. `agbridge enroll` installs the daemon unit for you on
+# Linux; there is no built-in installer for the agent, so this file
+# fills that gap.
+#
+# Install (as your normal user — no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__EXE__|$(command -v agbridge)|" \
+#       -e "s|__STATE_DIR__|$HOME/.config/agbridge|" \
+#       agbridge-agent.service > ~/.config/systemd/user/agbridge-agent.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agbridge-agent.service
+#
+# Keep it running after logout/reboot:
+#   sudo loginctl enable-linger $USER
+#
+# Logs / status:
+#   systemctl --user status agbridge-agent.service
+#   journalctl --user -u agbridge-agent.service -f
+[Unit]
+Description=agbridge agent connection-reuse broker
+Documentation=https://github.com/pw0rld/agbridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --exit-after 0 keeps the broker resident; pooled connections are
+# still GC'd after --idle-timeout (default 15m). Drop the flag to let
+# it exit after 60m idle instead (systemd respawns it on next start).
+ExecStart=__EXE__ agent --state-dir "__STATE_DIR__" --exit-after 0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

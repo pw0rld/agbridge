@@ -372,6 +372,14 @@ L0  TLS 1.3
 The gateway runs a single TLS server. WebSocket upgrade requests go to
 the CLI/daemon relay. `POST /v1/enroll` goes to the enrollment handler.
 
+## Documentation
+
+- [QUICKSTART.md](QUICKSTART.md) — end-to-end setup: gateway → daemon → client → first commands.
+- [docs/deployment.md](docs/deployment.md) — production gateway hosting, credential lifecycle, monitoring.
+- [examples/](examples/) — AI-agent/`--json` cookbook, launchd/systemd service templates.
+- [THREAT-MODEL.md](THREAT-MODEL.md) / [SECURITY.md](SECURITY.md) — what the design assumes and how to report issues.
+- [ROADMAP.md](ROADMAP.md) — shipped work and known next items.
+
 ## Status
 
 Current release line: v0.0.2, CLI-first.
