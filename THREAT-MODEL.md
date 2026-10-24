@@ -70,8 +70,10 @@ The threat model assumes an attacker who has **at least one** of:
    frame in transit between bridge and daemon.
 2. **Network MITM** between bridge ↔ gateway or gateway ↔ daemon.
    Mitigated by TLS + cert pinning at the transport layer; further
-   mitigated by E2E Noise between bridge and daemon when
-   `e2e_mode=required`.
+   mitigated by E2E Noise between bridge and daemon whenever e2e is
+   configured (`e2e_mode=optional` or `required` — in both modes the
+   daemon refuses unauthenticated plaintext Route frames; only legacy
+   `disabled` mode runs plaintext end to end).
 3. **Malicious bridge** that has somehow obtained a bridge
    enrollment token (e.g. by phishing the user). They can speak the
    protocol but have a specific pubkey identity.

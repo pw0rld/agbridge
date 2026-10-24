@@ -309,8 +309,10 @@ under a least-privilege account.
 
 - `disabled`: legacy plaintext inner frames; gateway can see tool
   payloads.
-- `optional`: Noise IK is negotiated; an empty daemon client allowlist
-  accepts authenticated CLI clients for the same tenant.
+- `optional`: Noise IK is required for every tool call — plaintext
+  inner frames are refused, so a hostile gateway cannot inject tool
+  calls — but `allowed_bridge_pubkeys` may stay empty, letting any
+  gateway-authenticated CLI client complete the handshake.
 - `required`: daemon requires a non-empty `allowed_bridge_pubkeys` list
   and rejects unpinned clients.
 

@@ -246,6 +246,9 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		case proto.FrameTypeRoute:
 			innerBytes, err := state.unwrapRoute(f.Payload)
 			if err != nil {
+				if errors.Is(err, errPlaintextRoute) {
+					fmt.Fprintf(os.Stderr, "daemon: refused plaintext route under e2e_mode=%s\n", state.e2e.mode)
+				}
 				continue
 			}
 			inner, err := proto.Decode(innerBytes)
@@ -370,10 +373,21 @@ func (s *daemonState) sendInner(ctx context.Context, inner proto.Frame) {
 	_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: payload})
 }
 
+// errPlaintextRoute is returned when the gateway delivers a plaintext
+// Route payload but the daemon runs with e2e configured. Only e2e_mode
+// == "disabled" (s.e2e == nil, legacy mode with a documented
+// gateway-sees-everything trust stance) accepts plaintext inner frames.
+var errPlaintextRoute = errors.New("plaintext Route refused: e2e is configured")
+
 // unwrapRoute extracts the inner frame bytes from a Route payload. If a
 // session is active the payload is AEAD-decrypted (after stripping the
-// 8-byte session_id prefix). When e2e_mode == "required" and no session
-// exists, plaintext Route is rejected outright.
+// 8-byte session_id prefix). When e2e is configured (optional or
+// required) and no session exists, plaintext Route is rejected outright:
+// the gateway is explicitly modelled as a potential attacker
+// (THREAT-MODEL "Compromised gateway"), and accepting unauthenticated
+// plaintext frames in optional mode would let a hostile gateway inject
+// tool calls — including exec — before or instead of a real Noise
+// session.
 func (s *daemonState) unwrapRoute(payload []byte) ([]byte, error) {
 	s.sessionMu.Lock()
 	sess := s.session
@@ -381,8 +395,8 @@ func (s *daemonState) unwrapRoute(payload []byte) ([]byte, error) {
 	s.sessionMu.Unlock()
 
 	if sess == nil {
-		if s.e2e != nil && s.e2e.mode == "required" {
-			return nil, errors.New("plaintext Route refused under e2e_mode=required")
+		if s.e2e != nil {
+			return nil, errPlaintextRoute
 		}
 		return payload, nil
 	}
