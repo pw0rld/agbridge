@@ -1,0 +1,61 @@
+# GoReleaser — single source of truth for release artifact packaging.
+#
+# Artifact names are a public contract: scripts/install.sh and
+# scripts/install.ps1 download `agbridge-<os>-<arch>[.exe]` directly from
+# GitHub Releases and verify against `SHA256SUMS` (plain "hash name"
+# lines). Do not rename the archives or switch to tarballs without
+# updating both installers in the same commit.
+#
+# .github/workflows/release.yml runs `goreleaser release --skip=publish`
+# and uploads dist/ itself via softprops/action-gh-release, because it
+# also attaches versioned notes (.github/release-notes/<tag>.md) and the
+# helper install scripts. Publish through that workflow, not by running
+# goreleaser locally with a token.
+
+version: 2
+
+project_name: agbridge
+
+builds:
+  - id: agbridge
+    main: ./cmd/agbridge
+    binary: agbridge
+    env:
+      # Static binaries: no glibc linkage, so artifacts run on RHEL 8 /
+      # Anolis 3 / Aliyun Linux (glibc 2.32), not just modern distros.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # Stamp the exact release tag so `agbridge --version` can never
+      # drift from the tag it was cut from. goreleaser strips the "v"
+      # from .Version, so re-add it to match the v-prefixed default in
+      # cmd/agbridge/version.go.
+      - -s -w -X main.agbridgeVersion=v{{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: binaries
+    # Includes all builds (there is only one).
+    # Raw binaries (agbridge-linux-amd64, ...-windows-amd64.exe), which is
+    # exactly what the installers fetch — no archive extraction step.
+    formats:
+      - binary
+    name_template: "agbridge-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "SHA256SUMS"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+# Kept minimal: the release workflow owns publishing (see header comment).
+release:
+  mode: replace

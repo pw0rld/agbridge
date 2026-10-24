@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to (re)release artifacts for (e.g., v0.1.0-phase-a)'
+        description: 'Existing tag to (re)release artifacts for (e.g., v0.1.0-phase-b)'
         required: true
 
 jobs:
@@ -15,51 +15,50 @@ jobs:
 
   build:
     needs: validate
-    name: build ${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+    name: goreleaser build (6 targets)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - { goos: linux,  goarch: amd64 }
-          - { goos: linux,  goarch: arm64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
-          - { goos: windows, goarch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # goreleaser derives the version and changelog from tags.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: build binary
+      # Packaging (matrix, naming, ldflags, SHA256SUMS) lives in
+      # .goreleaser.yaml. Publishing happens in the release job below so
+      # versioned notes and helper scripts can be attached, hence
+      # --skip=publish here.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean --skip=publish
         env:
-          GOOS: ${{ matrix.target.goos }}
-          GOARCH: ${{ matrix.target.goarch }}
-          # CGO_ENABLED=0 makes the binary fully static (no glibc linkage),
-          # so it runs on RHEL 8 / Anolis 3 / Aliyun Linux which ship
-          # glibc 2.32 — github's ubuntu-latest runner is on glibc 2.35+.
-          CGO_ENABLED: "0"
-          # Stamp the exact release tag into the binary so `agbridge
-          # --version` can never drift from the tag it was cut from
-          # (which is what the agbridge-cloud version guard compares).
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # goreleaser v2 keeps "binary" archives virtual: artifacts.json maps
+      # the final name (agbridge-<os>-<arch>[.exe]) onto the raw build
+      # directory path without copying. Materialize the renamed files here
+      # so the upload glob and the softprops step below stay plain.
+      - name: materialize release binaries
         run: |
-          out="agbridge-${GOOS}-${GOARCH}"
-          if [ "${GOOS}" = windows ]; then out="${out}.exe"; fi
-          go build -trimpath -ldflags="-s -w -X main.agbridgeVersion=${TAG}" -o "${out}" ./cmd/agbridge
-          ls -la "${out}"
-          file "${out}" || true
-          ./"${out}" --version 2>/dev/null || true
+          jq -r 'map(select(.type=="Binary" and .extra.ID=="binaries"))
+                 | .[] | "\(.path)\t\(.name)"' dist/artifacts.json |
+          while IFS=$'\t' read -r path name; do
+            cp "$path" "dist/$name"
+          done
+          test "$(find dist -maxdepth 1 -name 'agbridge-*' ! -type d | wc -l)" -eq 6
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
-          path: agbridge-${{ matrix.target.goos }}-${{ matrix.target.goarch }}*
+          name: dist
+          path: |
+            dist/agbridge-*
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
 
@@ -76,8 +75,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          name: dist
           path: dist
-          merge-multiple: true
 
       - name: include helper scripts
         run: |
@@ -85,13 +84,10 @@ jobs:
           cp scripts/install.ps1       dist/install.ps1
           cp scripts/gateway-setup.sh  dist/gateway-setup.sh
 
-      - name: compute SHA256SUMS
+      - name: extend SHA256SUMS with helper scripts
         working-directory: dist
         run: |
-          ls -la
-          # Hash all release assets (binaries + helper scripts) so users
-          # can verify integrity for whichever they download.
-          sha256sum agbridge-* install.sh install.ps1 gateway-setup.sh > SHA256SUMS
+          sha256sum install.sh install.ps1 gateway-setup.sh >> SHA256SUMS
           cat SHA256SUMS
 
       - name: resolve tag name
