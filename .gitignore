@@ -15,7 +15,8 @@
 .DS_Store
 
 # Planning docs (private, not part of OSS)
-/docs/
+/docs/*
+!/docs/deployment.md
 
 # Operational state from running gateway/daemon
 audit.jsonl

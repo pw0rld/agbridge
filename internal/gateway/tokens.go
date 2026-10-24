@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
@@ -10,6 +11,16 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/pw0rld/agbridge/internal/filelock"
+)
+
+// Token GC defaults: sweep hourly, drop used tokens and long-expired
+// unused ones after a week of tombstone (audit trail stays in the
+// gateway log; the store is not the record of enrollment history).
+const (
+	TokenGCInterval  = 1 * time.Hour
+	TokenGCRetention = 7 * 24 * time.Hour
 )
 
 // Token is a one-shot enrollment credential. After Consume() it is
@@ -73,6 +84,20 @@ func NewTokenStore(path string) (*TokenStore, error) {
 	return s, nil
 }
 
+// crossLock serialises the reload→mutate→flush sequences against
+// sibling processes (CLI issue-token vs the running gateway). Without
+// it, a store that reloaded before a sibling's flush writes back a
+// stale map and resurrects tokens the sibling already consumed —
+// double-spend of a one-shot credential. The lock lives on a sidecar
+// file because flushLocked replaces the data file via rename.
+func (s *TokenStore) crossLock() (*filelock.Locker, error) {
+	lock, err := filelock.Acquire(s.path, filelock.DefaultTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("tokens: %w", err)
+	}
+	return lock, nil
+}
+
 // Issue creates and persists a new token.
 func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 	if req.Role != "bridge" && req.Role != "daemon" {
@@ -110,14 +135,24 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 		Policy:    req.Policy,
 		ExpiresAt: time.Now().Add(req.TTL),
 	}
-	s.mu.Lock()
-	// Pull in any tokens issued by a sibling process (e.g. CLI vs running
-	// gateway). The single tokens.json file is the source of truth.
-	_ = s.reloadLocked()
-	s.toks[tok.Token] = tok
-	err := s.flushLocked()
-	s.mu.Unlock()
+	lock, err := s.crossLock()
 	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Pull in any tokens issued by a sibling process (e.g. CLI vs running
+	// gateway). The single tokens.json file is the source of truth. A
+	// reload failure must abort: flushing the pre-lock snapshot over a
+	// file we could not read would drop a token a sibling just issued
+	// (or resurrect one it just consumed) — the exact lost update the
+	// sidecar lock exists to prevent.
+	if err := s.reloadLocked(); err != nil {
+		return nil, fmt.Errorf("tokens: reload before issue: %w", err)
+	}
+	s.toks[tok.Token] = tok
+	if err := s.flushLocked(); err != nil {
 		return nil, err
 	}
 	return tok, nil
@@ -126,12 +161,21 @@ func (s *TokenStore) Issue(req TokenRequest) (*Token, error) {
 // Consume validates and marks a token used. Caller must call once.
 // Subsequent calls with the same token return an error.
 func (s *TokenStore) Consume(t string) (*Token, error) {
+	lock, err := s.crossLock()
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Tokens may have been issued by a sibling process (the CLI
 	// `agbridge issue-token`) after we loaded the store; refresh
-	// from disk before lookup so we don't 401 a valid token.
-	_ = s.reloadLocked()
+	// from disk before lookup so we don't 401 a valid token. Abort on
+	// failure: marking a token used on a stale snapshot would flush the
+	// stale map back and undo a sibling's work.
+	if err := s.reloadLocked(); err != nil {
+		return nil, fmt.Errorf("tokens: reload before consume: %w", err)
+	}
 	tok, ok := s.toks[t]
 	if !ok {
 		return nil, errors.New("tokens: not found")
@@ -151,8 +195,37 @@ func (s *TokenStore) Consume(t string) (*Token, error) {
 	return &out, nil
 }
 
+// Peek returns a copy of t without consuming it. The enroll handler
+// uses it to reject a request before burning the one-shot token.
+func (s *TokenStore) Peek(t string) (*Token, error) {
+	lock, err := s.crossLock()
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return nil, fmt.Errorf("tokens: reload before peek: %w", err)
+	}
+	tok, ok := s.toks[t]
+	if !ok {
+		return nil, errors.New("tokens: not found")
+	}
+	if tok.Used {
+		return nil, errors.New("tokens: already used")
+	}
+	if time.Now().After(tok.ExpiresAt) {
+		return nil, errors.New("tokens: expired")
+	}
+	out := *tok
+	return &out, nil
+}
+
 // reloadLocked re-reads tokens.json into s.toks. Callers must hold s.mu.
-// Errors are non-fatal (the in-memory state is preserved).
+// A missing or empty file is not an error (fresh store); any other
+// failure leaves s.toks untouched and is returned to the caller, which
+// must abort rather than flush a stale snapshot over the file.
 func (s *TokenStore) reloadLocked() error {
 	b, err := os.ReadFile(s.path)
 	if err != nil {
@@ -174,8 +247,18 @@ func (s *TokenStore) reloadLocked() error {
 
 // GC removes used + expired tokens older than retention.
 func (s *TokenStore) GC(retention time.Duration) error {
+	lock, err := s.crossLock()
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// GC flushes the whole map too, so it must not run on a snapshot a
+	// sibling has since advanced (would resurrect fresh/consumed tokens).
+	if err := s.reloadLocked(); err != nil {
+		return fmt.Errorf("tokens: reload before gc: %w", err)
+	}
 	cutoff := time.Now().Add(-retention)
 	for k, t := range s.toks {
 		if t.Used && t.UsedAt.Before(cutoff) {
@@ -186,6 +269,33 @@ func (s *TokenStore) GC(retention time.Duration) error {
 		}
 	}
 	return s.flushLocked()
+}
+
+// GCLoop calls GC every interval until ctx cancels. interval/retention
+// of 0 select TokenGCInterval/TokenGCRetention. Runs on the calling
+// goroutine; start it with go store.GCLoop(ctx, ...). onErr, if
+// non-nil, receives sweep failures (the loop keeps running).
+func (s *TokenStore) GCLoop(ctx context.Context, interval, retention time.Duration, onErr func(error)) {
+	if interval <= 0 {
+		interval = TokenGCInterval
+	}
+	if retention <= 0 {
+		retention = TokenGCRetention
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.GC(retention); err != nil {
+				if onErr != nil {
+					onErr(err)
+				}
+			}
+		}
+	}
 }
 
 // List returns a copy of all known tokens (used for gateway list-devices).

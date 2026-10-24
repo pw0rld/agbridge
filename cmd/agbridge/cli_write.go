@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +27,7 @@ import (
 func newWriteCmd() *cobra.Command {
 	var content string
 	var fromFile string
-	var mode uint32
+	var modeStr string
 	var explicit bool
 	cmd := &cobra.Command{
 		Use:   "write <path>",
@@ -45,6 +44,11 @@ func newWriteCmd() *cobra.Command {
 				printErrorJSON(cmd.ErrOrStderr(), "state_unreadable", err.Error(), false)
 				return err
 			}
+			mode, err := parseMode(modeStr)
+			if err != nil {
+				printErrorJSON(cmd.ErrOrStderr(), "bad_payload", err.Error(), false)
+				return err
+			}
 			data, err := resolveWriteContent(cmd, content, explicit, fromFile)
 			if err != nil {
 				printErrorJSON(cmd.ErrOrStderr(), "bad_payload", err.Error(), false)
@@ -55,7 +59,7 @@ func newWriteCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&content, "content", "", "inline content (use empty string to touch a zero-byte file)")
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "read content from a local file path")
-	cmd.Flags().Uint32Var(&mode, "mode", 0, "file mode (octal, e.g. 0644); 0 = daemon default")
+	cmd.Flags().StringVar(&modeStr, "mode", "", "file mode (octal, e.g. 0644); 0 = daemon default")
 	return cmd
 }
 
@@ -88,22 +92,19 @@ func runWrite(cmd *cobra.Command, path string, data []byte, mode uint32, opts cl
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{"path": path}
-		if mode != 0 {
-			argsMap["mode"] = mode
-		}
-		// Prefer the raw `content` field for valid UTF-8 (cheaper on
-		// the wire and matches the F9 write_file ergonomics). Fall
-		// back to base64 for arbitrary bytes.
-		if utf8.Valid(data) {
-			argsMap["content"] = string(data)
-		} else {
-			argsMap["content_b64"] = base64.StdEncoding.EncodeToString(data)
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().WriteFileHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{"path": path}
+	if mode != 0 {
+		argsMap["mode"] = mode
+	}
+	// Prefer the raw `content` field for valid UTF-8 (cheaper on
+	// the wire and matches the F9 write_file ergonomics). Fall
+	// back to base64 for arbitrary bytes.
+	if utf8.Valid(data) {
+		argsMap["content"] = string(data)
+	} else {
+		argsMap["content_b64"] = base64.StdEncoding.EncodeToString(data)
+	}
+	res, err := invokeRouted(ctx, opts, "write_file", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

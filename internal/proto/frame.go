@@ -12,12 +12,14 @@ import (
 const ProtocolVersion uint8 = 1
 
 const (
-	maxReqIDLen   = 1 << 16
-	maxPayloadLen = 1 << 26 // 64 MB
+	// maxReqIDLen must fit the 2-byte reqid_len wire field: 1<<16 would
+	// overflow uint16 to 0 and emit a corrupted frame.
+	maxReqIDLen   = 1<<16 - 1 // 65535
+	maxPayloadLen = 1 << 26   // 64 MB
 )
 
 var (
-	ErrReqIDTooLong    = errors.New("proto: reqid exceeds 64 KB")
+	ErrReqIDTooLong    = errors.New("proto: reqid exceeds 65535 bytes")
 	ErrPayloadTooLong  = errors.New("proto: payload exceeds 64 MB")
 	ErrShortFrame      = errors.New("proto: frame truncated")
 	ErrVersionMismatch = errors.New("proto: protocol version mismatch")
@@ -67,6 +69,15 @@ const (
 	// upload mode (chunks vs URL) and download offset/limit.
 	FrameTypeUploadRequest   FrameType = 70
 	FrameTypeDownloadRequest FrameType = 71
+
+	// FrameTypeFileChunkBin carries a FileChunk in compact binary form
+	// (1 flags byte, bit0 = eof, followed by raw data) instead of the
+	// JSON+base64 FileChunk encoding, removing the +33% expansion on
+	// bulk transfers. Additive: senders only use it when the peer
+	// advertises capabilities.BinaryChunks (old peers never do);
+	// receivers accept both types, so mixed-version sessions stay on
+	// FrameTypeFileChunk.
+	FrameTypeFileChunkBin FrameType = 72
 
 	// Background process management (v0.3.0+). A single request frame
 	// carries action=start|status|logs|kill|list with action-specific

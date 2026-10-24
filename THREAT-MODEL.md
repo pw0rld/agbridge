@@ -22,12 +22,11 @@ that lands).
 ## Architecture (one paragraph)
 
 agbridge has three components. The **daemon** runs on the host you
-want an AI to operate; it holds capabilities (file read/write, exec,
-port-forward). The **gateway** is a relay that brokers connections
-between daemons and bridges. The **bridge** runs on the host where
-your AI client (Claude Code / Codex / etc.) lives; it speaks MCP to
-the AI client and translates MCP calls into daemon-bound frames over
-the gateway.
+want an AI to operate; it holds capabilities (file read/write,
+exec). The **gateway** is a relay that brokers connections
+between daemons and bridges. The **bridge** is the one-shot CLI on
+the host where your AI client (Claude Code / Codex / etc.) lives; it
+turns each CLI invocation into daemon-bound frames over the gateway.
 
 The interesting threat model question is: **how much do you have to
 trust the gateway?** The honest answer is *less than you'd think* —
@@ -70,8 +69,10 @@ The threat model assumes an attacker who has **at least one** of:
    frame in transit between bridge and daemon.
 2. **Network MITM** between bridge ↔ gateway or gateway ↔ daemon.
    Mitigated by TLS + cert pinning at the transport layer; further
-   mitigated by E2E Noise between bridge and daemon when
-   `e2e_mode=required`.
+   mitigated by E2E Noise between bridge and daemon whenever e2e is
+   configured (`e2e_mode=optional` or `required` — in both modes the
+   daemon refuses unauthenticated plaintext Route frames; only legacy
+   `disabled` mode runs plaintext end to end).
 3. **Malicious bridge** that has somehow obtained a bridge
    enrollment token (e.g. by phishing the user). They can speak the
    protocol but have a specific pubkey identity.
@@ -89,7 +90,8 @@ The threat model **does not** assume:
   (used to issue enrollment tokens).
 - A user-supplied AI client that's been replaced with a malicious
   binary (the trust boundary is the bridge ↔ daemon protocol, not
-  the AI client ↔ bridge MCP local socket).
+  the AI client ↔ CLI invocation boundary — the client just shells
+  out with the state dir).
 
 ---
 
@@ -188,12 +190,14 @@ can, by design.
   per-port allowlist. Operators who care should set this explicitly
   in `state.json`.
 
-- **Bridge ↔ AI client local socket has no authentication.** Any
-  local process running under the bridge UID can connect to the
-  bridge's MCP socket and issue tool calls. This is acceptable
-  because if an attacker is already running code as the bridge UID,
-  they don't need agbridge — they can just `ssh`. But it's worth
-  knowing.
+- **Client state dir has no authentication beyond file
+  permissions.** Any local process running under the bridge UID can
+  read `state.json` + `bridge_noise.key` and issue fully authorized
+  CLI calls (the dir is created `0700`, keys `0600`). This is
+  acceptable because if an attacker is already running code as the
+  bridge UID, they don't need agbridge — they can just `ssh`. But
+  it's worth knowing: don't share one client state dir between
+  users. The optional agent broker's UDS is likewise UID-protected.
 
 ---
 

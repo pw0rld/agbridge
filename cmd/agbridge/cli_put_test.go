@@ -70,7 +70,14 @@ func TestParseMode(t *testing.T) {
 		{"0644", 0o644, true},
 		{"644", 0o644, true},
 		{"755", 0o755, true},
+		{"777", 0o777, true},
+		{"0777", 0o777, true},
 		{"bogus", 0, false},
+		// setuid/setgid/sticky are rejected outright (daemon never honors them)
+		{"7777", 0, false},
+		{"07777", 0, false},
+		{"4755", 0, false},
+		{"1000", 0, false},
 	}
 	for _, c := range cases {
 		got, err := parseMode(c.in)

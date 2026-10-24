@@ -26,9 +26,12 @@ type ListDirResponse struct {
 	ErrDetail string     `json:"err_detail,omitempty"`
 }
 
-// StatRequest asks for metadata of a single path.
+// StatRequest asks for metadata of a single path. Follow resolves the
+// final path component if it is a symlink (like stat(1) -L); the default
+// reports the link itself (lstat semantics).
 type StatRequest struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Follow bool   `json:"follow,omitempty"`
 }
 
 // StatResponse: Entry nil iff Err is set.

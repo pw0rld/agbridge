@@ -42,6 +42,7 @@ type Instance struct {
 	Addr     net.Addr
 	Creds    *CredRegistry
 	Sessions *SessionTable
+	Metrics  *Metrics
 }
 
 // Run starts the gateway and returns an Instance handle.
@@ -62,6 +63,7 @@ func RunWithHandler(ctx context.Context, tlsCfg *tls.Config, cfg *config.Gateway
 		Addr:     ln.Addr(),
 		Creds:    NewCredRegistry(cfg),
 		Sessions: NewSessionTable(),
+		Metrics:  NewMetrics(),
 	}
 	go func() {
 		<-ctx.Done()
@@ -96,6 +98,7 @@ func handleConn(ctx context.Context, c connIO, inst *Instance, reg *Registry, au
 		handleBridge(ctx, c, hello, inst, reg, aud)
 	default:
 		_ = c.Send(ctx, errFrame("unknown_role"))
+		inst.Metrics.authFailed()
 		_ = aud.Append(map[string]any{"event": "auth_failed", "reason": "unknown_role", "name": hello.Name})
 	}
 }
@@ -116,12 +119,14 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	entry, ok := inst.Creds.LookupDaemon(h.Name)
 	if !ok || !auth.SecretMatches(h.Secret, entry.TokenHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
+		inst.Metrics.authFailed()
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
 		return
 	}
-	proxy := NewDaemonProxy(c)
+	proxy := NewDaemonProxy(c, h.ProtocolVersion)
 	if err := reg.Register(h.Name, proxy); err != nil {
 		_ = c.Send(ctx, errFrame("duplicate_daemon"))
+		inst.Metrics.authFailed()
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name, "reason": "duplicate"})
 		return
 	}
@@ -131,11 +136,13 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	})
 	defer release()
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
+	inst.Metrics.daemonConnected()
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "daemon", "name": h.Name})
 	// Pair the auth_ok with a conn_close on the way out so the audit log is
 	// a complete connect/disconnect ledger — operators consuming the log
 	// can detect when a daemon goes offline without polling.
 	defer func() {
+		inst.Metrics.daemonDisconnected()
 		_ = aud.Append(map[string]any{"event": "conn_close", "role": "daemon", "name": h.Name})
 	}()
 	// Read loop owned by handleDaemon (not by any individual bridge): each
@@ -147,6 +154,7 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		if err != nil {
 			return
 		}
+		inst.Metrics.noteDaemonInbound(frameWireSize(f))
 		_ = proxy.Deliver(ctx, f)
 	}
 }
@@ -155,11 +163,13 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	entry, ok := inst.Creds.LookupAgent(h.Name)
 	if !ok || !auth.SecretMatches(h.Secret, entry.APIKeyHash) {
 		_ = c.Send(ctx, errFrame("auth_failed"))
+		inst.Metrics.authFailed()
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "bridge", "name": h.Name})
 		return
 	}
 	if !contains(entry.AllowedDaemons, h.TargetDaemon) {
 		_ = c.Send(ctx, errFrame("daemon_not_allowed"))
+		inst.Metrics.authzFailed()
 		_ = aud.Append(map[string]any{"event": "authz_failed", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 		return
 	}
@@ -182,17 +192,20 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		_ = replaced.Send(sendCtx, errFrame("session_replaced"))
 		sendCancel()
 		_ = replaced.Close()
+		inst.Metrics.sessionReplaced()
 		_ = aud.Append(map[string]any{
 			"event": "bridge_replaced", "name": h.Name,
 			"reason": "newer bridge with same identity connected",
 		})
 	}
 	_ = c.Send(ctx, proto.Frame{Type: proto.FrameTypeHelloAck})
+	inst.Metrics.bridgeConnected()
 	_ = aud.Append(map[string]any{"event": "auth_ok", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 	// Pair the auth_ok with a conn_close on the way out so the audit log
 	// is a complete connect/disconnect ledger (see handleDaemon for the
 	// daemon-side equivalent).
 	defer func() {
+		inst.Metrics.bridgeDisconnected()
 		_ = aud.Append(map[string]any{"event": "conn_close", "role": "bridge", "name": h.Name, "target": h.TargetDaemon})
 	}()
 
@@ -204,16 +217,50 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
 		return
 	}
+	// Cross-generation pairing is refused: a v0.0.3-bridge believes the
+	// daemon still enforces path allowlists, and a v0.0.5-bridge would
+	// bootstrap a working directory from a daemon that has none. Neither
+	// failure is visible to the peers without an explicit rejection.
+	if bridgeVer := h.EffectiveVersion(); bridgeVer != proxy.ProtoVersion() {
+		_ = c.Send(ctx, errFrame("protocol_mismatch"))
+		inst.Metrics.protocolMismatch()
+		_ = aud.Append(map[string]any{
+			"event": "route_failed", "reason": "protocol_mismatch", "target": h.TargetDaemon,
+			"bridge_version": bridgeVer, "daemon_version": proxy.ProtoVersion(),
+		})
+		return
+	}
 
 	// Subscribe to daemon→bridge frames for the duration of this session.
-	// On return, clear the writer so the daemon read loop in handleDaemon
-	// drops further frames instead of writing to a dead bconn.
+	// Unsubscribe removes exactly this subscription — an old bridge's
+	// teardown can never clear a newer bridge's writer (the classic
+	// replace-race hang the single writer slot used to cause).
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	proxy.SetWriter(func(_ context.Context, f proto.Frame) error {
-		return c.Send(bridgeCtx, f)
+	// Daemon→bridge frames ride a bounded queue drained by a dedicated
+	// sender goroutine: Deliver runs in the daemon's read loop, so a
+	// synchronous conn write here lets one stalled bridge head-of-line
+	// block every other subscriber of that daemon (and its control
+	// traffic). Overflow severs this session rather than dropping
+	// frames — dropped frames would corrupt E2E nonce ordering.
+	sendQ := newFrameQueue(bridgeCtx, c.Send, inst.Metrics)
+	sub := proxy.Subscribe(h.Name, func(_ context.Context, f proto.Frame) error {
+		if err := sendQ.submit(f); err != nil {
+			cancel()      // stop the sender goroutine
+			_ = c.Close() // wake the bridge→daemon loop; its defers unsubscribe & release
+			// Only a genuinely full queue is an overflow. submit also
+			// reports context.Canceled and ErrSendQueueClosed while a
+			// session is tearing down, and counting those turned every
+			// ordinary bridge disconnect into an overflow alert.
+			if errors.Is(err, ErrSendQueueFull) {
+				inst.Metrics.queueOverflow()
+				_ = aud.Append(map[string]any{"event": "bridge_queue_overflow", "agent": h.Name, "target": h.TargetDaemon})
+			}
+			return err
+		}
+		return nil
 	})
-	defer proxy.SetWriter(nil)
+	defer proxy.Unsubscribe(sub)
 
 	// bridge → daemon main loop.
 	for {
@@ -226,14 +273,17 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 			inner, err := auth.VerifyFrame(apiKey, f.Payload)
 			if err != nil {
 				_ = c.Send(bridgeCtx, errFrame("bad_mac"))
+				inst.Metrics.macFailed()
 				_ = aud.Append(map[string]any{"event": "mac_failed", "agent": h.Name, "target": h.TargetDaemon})
 				return
 			}
 			_ = aud.Append(map[string]any{"event": "route", "agent": h.Name, "target": h.TargetDaemon, "bytes": len(f.Payload)})
-			if err := proxy.Send(bridgeCtx, proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}); err != nil {
+			sent := proto.Frame{Type: proto.FrameTypeRoute, Payload: inner}
+			if err := proxy.Send(bridgeCtx, sent); err != nil {
 				_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
 				return
 			}
+			inst.Metrics.noteToDaemon(frameWireSize(sent))
 		case proto.FrameTypeNoiseInit, proto.FrameTypeNoiseRekey:
 			// Noise handshake / rekey frames: forward opaquely. Integrity
 			// and authenticity are enforced by Noise itself (msg1 carries
@@ -244,6 +294,7 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 				_ = c.Send(bridgeCtx, errFrame("daemon_send_failed"))
 				return
 			}
+			inst.Metrics.noteToDaemon(frameWireSize(f))
 		default:
 			// ignore stray frames silently
 		}

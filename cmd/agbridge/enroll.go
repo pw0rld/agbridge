@@ -22,9 +22,22 @@ import (
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/e2e"
+	"github.com/pw0rld/agbridge/internal/filelock"
 	"github.com/pw0rld/agbridge/internal/gateway"
 	"github.com/pw0rld/agbridge/internal/state"
 )
+
+// withStateLock runs fn while holding the cross-process lock for a
+// state file, so enroll's wholesale write can't interleave with the
+// load→modify→save cycles other CLI commands run on the same profile.
+func withStateLock(statePath string, fn func() error) error {
+	lock, err := filelock.Acquire(statePath, filelock.DefaultTimeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	return fn()
+}
 
 func newEnrollCmd() *cobra.Command {
 	var (
@@ -105,6 +118,9 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 		outcome.Error = err.Error()
 		if emitJSON {
 			_ = json.NewEncoder(stdout).Encode(outcome)
+			// The envelope is already on stdout; keep cliMain from
+			// adding a second JSON object.
+			return jsonError{fmt.Errorf("%s: %w", stage, err)}
 		}
 		return fmt.Errorf("%s: %w", stage, err)
 	}
@@ -289,7 +305,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 			KnownDaemons:        knownDaemons,
 			EnrolledAt:          time.Now(),
 		}
-		if err := state.SaveBridge(statePath, bs); err != nil {
+		if err := withStateLock(statePath, func() error { return state.SaveBridge(statePath, bs) }); err != nil {
 			report("save_state", false, err.Error(), time.Since(t0))
 			return fail("save_state", err)
 		}
@@ -309,7 +325,7 @@ func runEnroll(ctx context.Context, gwURL, tokenStr, stateDir, tlsMode, serviceU
 			DefaultWorkingDir:    enrollResp.DefaultWorkingDir,
 			EnrolledAt:           time.Now(),
 		}
-		if err := state.SaveDaemon(statePath, ds); err != nil {
+		if err := withStateLock(statePath, func() error { return state.SaveDaemon(statePath, ds) }); err != nil {
 			report("save_state", false, err.Error(), time.Since(t0))
 			return fail("save_state", err)
 		}

@@ -45,8 +45,8 @@ earlier:
 - The operator does not want to expose SSH or a broad VPN route.
 - The AI needs stable command output and structured errors, not an
   interactive terminal session.
-- Security wants local daemon policy: read/write path allowlists,
-  explicit exec enablement, environment filtering, and audit logs.
+- Security wants local daemon policy: explicit exec enablement,
+  environment filtering, a per-target working directory, and audit logs.
 
 agbridge is designed for that gap. It is not a VPN replacement and it is
 not trying to beat OpenSSH at SSH. It provides a narrow remote operation
@@ -77,8 +77,10 @@ client identity, not a long-running MCP stdio process.
   hosted TLS frontends such as Cloudflare.
 - **One-shot enrollment**: gateway-issued tokens, local Noise key
   generation, and per-device `state.json`.
-- **Daemon policy**: file read/write allowlists, `exec_enabled`, env
-  allowlist, non-root daemon startup, file size caps, typed errors.
+- **Daemon policy**: `exec_enabled`, env allowlist, non-root daemon
+  startup, file size caps, typed errors.
+- **Per-target working directory**: `cd` / `pwd` and relative paths
+  resolve per daemon (a soft base, not a security fence).
 - **AI-friendly output**: human output by default, `--json` with
   `_schema:1`, and single-line structured error JSON on stderr.
 
@@ -290,22 +292,27 @@ Output contract:
 | HMAC-SHA256 | CLI-client-to-gateway Route frame integrity using the API key |
 | Noise IK E2E | Inner CLI<->daemon payload confidentiality from the gateway |
 | Daemon client ACL | Optional client public-key allowlist on the daemon |
-| File path allowlists | `cat`, `ls`, `stat`, `grep`, `write`, `edit`, `put`, and `get` stay within enrolled paths |
+| Protocol generation check | Gateway refuses to pair bridge and daemon across protocol generations (v0.0.4 boundary vs v0.0.5+) |
 | `exec_enabled` | `agbridge exec` is denied unless explicitly enabled for the daemon |
 | Env allowlist | Only configured environment variables are forwarded to remote subprocesses |
 | Non-root daemon | Daemon refuses to run as root outside tests |
 
-Important policy detail: file allowlists do not sandbox `exec`. When
-`exec_enabled` is true, the command runs as the daemon OS user and can
-access what that user can access. Use `agbridge caps` before assuming a
-path is or is not reachable.
+Important policy detail: since v0.0.4 the daemon enforces **no path
+allowlist**. The working directory (`cd` / `pwd`,
+`default_working_dir`) is a convenience base for resolving relative
+paths — absolute paths and `..` pass through. The real access boundary
+is the daemon's OS user plus the Noise client identity. Use
+`agbridge caps` to see what a daemon advertises, and run the daemon
+under a least-privilege account.
 
 ### E2E Modes
 
 - `disabled`: legacy plaintext inner frames; gateway can see tool
   payloads.
-- `optional`: Noise IK is negotiated; an empty daemon client allowlist
-  accepts authenticated CLI clients for the same tenant.
+- `optional`: Noise IK is required for every tool call — plaintext
+  inner frames are refused, so a hostile gateway cannot inject tool
+  calls — but `allowed_bridge_pubkeys` may stay empty, letting any
+  gateway-authenticated CLI client complete the handshake.
 - `required`: daemon requires a non-empty `allowed_bridge_pubkeys` list
   and rejects unpinned clients.
 
@@ -364,6 +371,14 @@ L0  TLS 1.3
 
 The gateway runs a single TLS server. WebSocket upgrade requests go to
 the CLI/daemon relay. `POST /v1/enroll` goes to the enrollment handler.
+
+## Documentation
+
+- [QUICKSTART.md](QUICKSTART.md) — end-to-end setup: gateway → daemon → client → first commands.
+- [docs/deployment.md](docs/deployment.md) — production gateway hosting, credential lifecycle, monitoring.
+- [examples/](examples/) — AI-agent/`--json` cookbook, launchd/systemd service templates.
+- [THREAT-MODEL.md](THREAT-MODEL.md) / [SECURITY.md](SECURITY.md) — what the design assumes and how to report issues.
+- [ROADMAP.md](ROADMAP.md) — shipped work and known next items.
 
 ## Status
 

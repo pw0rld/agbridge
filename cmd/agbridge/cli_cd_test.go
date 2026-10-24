@@ -47,8 +47,8 @@ func TestPwdBootstrapsFromCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBridge: %v", err)
 	}
-	if st.WorkingDir != tmpDir {
-		t.Fatalf("WorkingDir = %q, want %q", st.WorkingDir, tmpDir)
+	if st.WorkingDirs[opts.Target] != tmpDir {
+		t.Fatalf("WorkingDirs[%q] = %q, want %q", opts.Target, st.WorkingDirs[opts.Target], tmpDir)
 	}
 }
 
@@ -115,5 +115,43 @@ func TestCdRejectsMissingDir(t *testing.T) {
 	cmd.SetContext(env.ctx)
 	if err := runCd(cmd, "does-not-exist", opts); err == nil {
 		t.Fatal("cd to missing dir should error")
+	}
+}
+
+// TestSetWorkingDirIsPerTarget verifies that setting the working dir for
+// one target neither reads from nor overwrites another target's entry —
+// the regression that made `cd -t lab /x` silently redirect every other
+// daemon's relative-path resolution.
+func TestSetWorkingDirIsPerTarget(t *testing.T) {
+	dir := t.TempDir()
+	prevStateDir := g.stateDir
+	g.stateDir = dir
+	defer func() { g.stateDir = prevStateDir }()
+
+	st := &state.BridgeState{
+		Version:       state.CurrentVersion,
+		AgentName:     "a",
+		APIKey:        "k",
+		DefaultTarget: "lab01",
+		KnownDaemons:  map[string]state.DaemonRef{"lab01": {Pubkey: "p"}, "gpu": {Pubkey: "q"}},
+	}
+	if err := state.SaveBridge(filepath.Join(dir, "state.json"), st); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWorkingDir("lab01", "/on/lab"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWorkingDir("gpu", "/on/gpu"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := state.LoadBridge(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.WorkingDirs["lab01"] != "/on/lab" || got.WorkingDirs["gpu"] != "/on/gpu" {
+		t.Fatalf("per-target isolation broken: %v", got.WorkingDirs)
+	}
+	if got.WorkingDir != "" {
+		t.Fatalf("legacy global field was written: %q", got.WorkingDir)
 	}
 }

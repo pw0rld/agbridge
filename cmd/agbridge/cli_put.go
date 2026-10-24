@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -45,6 +44,9 @@ func newPutCmd() *cobra.Command {
 // parseMode accepts "0644", "644", "0", or "" and returns the parsed
 // octal mode. Empty or "0" means "use daemon default" — the field is
 // omitted from the JSON args so handler-side zero-handling kicks in.
+// Modes above 0777 are rejected: setuid/setgid/sticky bits are never
+// honored by the daemon, so accepting them here would only create
+// silently-ignored flags (better to fail loudly on explicit intent).
 func parseMode(s string) (uint32, error) {
 	if s == "" || s == "0" {
 		return 0, nil
@@ -52,6 +54,9 @@ func parseMode(s string) (uint32, error) {
 	v, err := strconv.ParseUint(s, 8, 32)
 	if err != nil {
 		return 0, fmt.Errorf("--mode %q: %w", s, err)
+	}
+	if v > 0o777 {
+		return 0, fmt.Errorf("--mode %q: permission bits only (0-777); setuid/setgid/sticky are not supported", s)
 	}
 	return uint32(v), nil
 }
@@ -68,18 +73,15 @@ func runPut(cmd *cobra.Command, localPath, remotePath string, mode uint32, opts 
 	}
 	remotePath = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{
-			"source":     "local_path",
-			"dest_path":  remotePath,
-			"local_path": localPath,
-		}
-		if mode != 0 {
-			argsMap["mode"] = mode
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().UploadHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{
+		"source":     "local_path",
+		"dest_path":  remotePath,
+		"local_path": localPath,
+	}
+	if mode != 0 {
+		argsMap["mode"] = mode
+	}
+	res, err := invokeRouted(ctx, opts, "upload", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

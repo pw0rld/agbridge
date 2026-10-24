@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/filelock"
 	"github.com/pw0rld/agbridge/internal/gateway"
 	"github.com/pw0rld/agbridge/internal/state"
 )
@@ -106,6 +107,14 @@ contain the name, the operator can also edit gateway.yaml directly.`,
 				return fmt.Errorf("--name required")
 			}
 			path := gatewayStatePath(cfgPath)
+			// Hold the same cross-process lock the gateway's enroll
+			// handler takes around its reload→save, so a prune can never
+			// interleave with (and be overwritten by) a concurrent enroll.
+			lock, err := filelock.Acquire(path, filelock.DefaultTimeout)
+			if err != nil {
+				return err
+			}
+			defer lock.Release()
 			prior, err := state.LoadGateway(path)
 			if err != nil {
 				return fmt.Errorf("load %s: %w (no devices enrolled yet?)", path, err)

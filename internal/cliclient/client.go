@@ -43,7 +43,16 @@ type Options struct {
 	// gateway. When nil (production default), dial builds the config
 	// from GatewayTLSMode + CertPin via auth.RuntimeTLSConfig.
 	// Primarily for tests; advanced users can also inject custom mTLS.
-	TLSConfig *tls.Config
+	// Never serialised: tls.Config carries func fields the agent's
+	// JSON hop cannot encode (and must not trust remotely anyway).
+	TLSConfig *tls.Config `json:"-"`
+	// AgentSocket, when non-empty, names a local `agbridge agent`
+	// broker socket. Routing through the agent is decided by the CLI
+	// layer (invokeRouted in cmd/agbridge); cliclient itself always
+	// performs full one-shot dials. Kept here so the marshalled
+	// Options the CLI hands the agent carry everything needed to
+	// reproduce the dial.
+	AgentSocket string `json:"agent_socket,omitempty"`
 }
 
 // OptionsFromBridgeConfig translates an existing v0.0.1 BridgeConfig
@@ -80,6 +89,26 @@ func Invoke(ctx context.Context, opts Options, fn func(ctx context.Context, c *C
 	}
 	defer c.Close()
 	return fn(ctx, c)
+}
+
+// Connect performs the full dial (TCP+TLS+WS+Hello+Noise) and returns
+// a live Client WITHOUT scheduling a close. Callers (the agent
+// connection pool) own the lifetime and MUST call Close.
+func Connect(ctx context.Context, opts Options) (*Client, error) {
+	c, err := dial(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("dial: %w", err)
+	}
+	return c, nil
+}
+
+// InvokeHandler is the one-shot counterpart of Router.Dispatch: dial,
+// run the named handler, close. Used as the fallback when the agent
+// socket is unavailable.
+func InvokeHandler(ctx context.Context, opts Options, handler string, args json.RawMessage) (any, error) {
+	return Invoke(ctx, opts, func(ctx context.Context, c *Client) (any, error) {
+		return c.Router().Dispatch(ctx, handler, args)
+	})
 }
 
 // Client wraps a live, handshook bridge connection. Exposes the
@@ -139,10 +168,11 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("wss dial: %w", err)
 	}
 	helloBytes, err := handshake.Hello{
-		Role:         "bridge",
-		Name:         opts.AgentName,
-		Secret:       opts.APIKey,
-		TargetDaemon: opts.Target,
+		Role:            "bridge",
+		Name:            opts.AgentName,
+		Secret:          opts.APIKey,
+		TargetDaemon:    opts.Target,
+		ProtocolVersion: handshake.ProtocolVersion,
 	}.Encode()
 	if err != nil {
 		_ = conn.Close()
@@ -184,7 +214,12 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 		E2EMode:             opts.E2EMode,
 		BridgeStaticKeyPath: opts.BridgeStaticKeyPath,
 	}
-	readerCtx, cancel := context.WithCancel(ctx)
+	// The reader must NOT inherit the dialing request's lifetime:
+	// Connect hands the Client to long-lived owners (the agent pool)
+	// whose per-request contexts expire while the connection stays
+	// in service. Teardown is Close()'s job (c.cancel) plus conn
+	// errors; WithoutCancel keeps the dial itself deadline-bound.
+	readerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	rt, err := NewRouter(readerCtx, conn, []byte(opts.APIKey), bcfg)
 	if err != nil {
 		cancel()

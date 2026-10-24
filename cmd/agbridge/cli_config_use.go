@@ -18,15 +18,14 @@ func newConfigUseCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := stateJSONPath(g.stateDir)
-			st, err := state.LoadBridge(path)
+			err := state.MutateBridge(path, func(st *state.BridgeState) error {
+				if _, ok := st.KnownDaemons[args[0]]; !ok {
+					return fmt.Errorf("unknown_target: %s", args[0])
+				}
+				st.DefaultTarget = args[0]
+				return nil
+			})
 			if err != nil {
-				return err
-			}
-			if _, ok := st.KnownDaemons[args[0]]; !ok {
-				return fmt.Errorf("unknown_target: %s", args[0])
-			}
-			st.DefaultTarget = args[0]
-			if err := state.SaveBridge(path, st); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "default target: %s\n", args[0])

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -118,19 +117,16 @@ func runExec(cmd *cobra.Command, remote []string, cwd string, env map[string]str
 		cwd = resolved
 	}
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{
-			"cmd":        remote[0],
-			"args":       remote[1:],
-			"timeout_ms": timeoutMs,
-			"cwd":        cwd,
-		}
-		if len(env) > 0 {
-			argsMap["env"] = env
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().ExecHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{
+		"cmd":        remote[0],
+		"args":       remote[1:],
+		"timeout_ms": timeoutMs,
+		"cwd":        cwd,
+	}
+	if len(env) > 0 {
+		argsMap["env"] = env
+	}
+	res, err := invokeRouted(ctx, opts, "exec", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

@@ -16,10 +16,11 @@ filesystem and shell.
 
 - File paths in CLI args refer to the **daemon's** filesystem.
 - `agbridge exec` runs in the **daemon's** shell, not yours.
-- The daemon may have a path allowlist; calls outside it fail with
-  `path_forbidden` immediately — don't retry without a different path.
+- The daemon's bound is its unprivileged OS user (it refuses to run
+  as root) plus `exec_enabled` + env allowlist; there is no separate
+  path allowlist to stay inside.
 - Run `agbridge ai-help` for a compact cheat sheet, or `agbridge caps`
-  to inspect the daemon's allowlists / version / sandbox.
+  to inspect the daemon's policy / version / capabilities.
 
 ## Global flags
 
@@ -98,9 +99,9 @@ v0.0.3 via an optional local daemon mode.
 3. **Errors are typed**, in the stderr JSON's `code`:
    - `bad_payload` — your args are wrong (path empty, offset negative,
      missing `--old` on `edit`, …). Don't retry blindly; fix the arg.
-   - `path_forbidden` — outside the daemon's allowlist. Don't retry
-     with the same path; pick a path inside the allowlist (run
-     `agbridge caps` for the list).
+   - `tool_forbidden` — the daemon refused the tool (e.g. `exec` when
+     the daemon was enrolled without `--exec-enabled`). Don't retry;
+     the operator must re-issue the token and re-enroll.
    - `not_found` — file/dir doesn't exist. Verify with
      `agbridge ls <parent>`.
    - `exceeds_max_size` — hit a 10 MB cap. Use `agbridge get` instead
@@ -223,8 +224,8 @@ just ask. Don't silently pick.
 
 ## If something goes wrong
 
-- Daemon side: error responses include enough detail to debug (allowed
-  paths in `path_forbidden`, the literal exit code in `exec` failures).
+- Daemon side: error responses include enough detail to debug (the
+  per-tool error code, the literal exit code in `exec` failures).
   Read them carefully before retrying.
 - Transport side: `network_lost` and `handshake_failed` are recoverable
   (`retry_safe:true`); everything else means you need to change your

@@ -1,0 +1,32 @@
+# agbridge daemon — systemd USER unit (reference template).
+#
+# NOTE: you normally do NOT need this file — `agbridge enroll` on
+# Linux auto-installs an equivalent unit (system-level when run as
+# root, user-level otherwise) and enables it. Use this template only
+# to recreate the unit by hand, e.g. after moving the binary or the
+# state dir, or on a host where enroll ran with --no-start-service.
+#
+# Install (as the user that owns the state dir — no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__EXE__|$(command -v agbridge)|" \
+#       -e "s|__STATE_DIR__|$HOME/.config/agbridge|" \
+#       agbridge-daemon.service > ~/.config/systemd/user/agbridge-daemon.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agbridge-daemon.service
+#
+# Keep it running after logout/reboot:
+#   sudo loginctl enable-linger $USER
+[Unit]
+Description=agbridge daemon
+Documentation=https://github.com/pw0rld/agbridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__EXE__ daemon --state-dir "__STATE_DIR__"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- agbridge agent broker (macOS LaunchAgent). Runs on the CONTROL
+     machine (where the CLI is invoked), not on the remote box.
+     Replace __EXE__ / __STATE_DIR__ (see README.md), then:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agbridge.agent.plist
+     --exit-after 0 keeps the broker resident; pooled connections are
+     still GC'd after --idle-timeout (default 15m). Omit the flag to
+     let it exit after 60m idle and be respawned at next use. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agbridge.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__EXE__</string>
+    <string>agent</string>
+    <string>--state-dir</string>
+    <string>__STATE_DIR__</string>
+    <string>--exit-after</string>
+    <string>0</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/agent.err.log</string>
+</dict>
+</plist>

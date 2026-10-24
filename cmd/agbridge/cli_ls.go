@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"path"
@@ -68,54 +67,54 @@ func runLs(cmd *cobra.Command, root string, recursive bool, depth int, opts clic
 	}
 	root = resolved
 
+	// BFS over list_dir. Each level is an independent routed call: on
+	// the agent path they share one hot connection; on the classic
+	// path we intentionally keep the old per-directory shape rather
+	// than holding a dial open across the whole walk.
 	var walks []lsWalk
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		queue := []string{root}
-		seenDepth := map[string]int{root: 0}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
-			argsJSON, _ := json.Marshal(map[string]any{"path": cur})
-			r, err := c.Router().ListDirectoryHandler(ctx, argsJSON)
-			if err != nil {
-				return nil, err
-			}
-			rmap, ok := r.(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("ls: unexpected handler shape: %T", r)
-			}
-			if isErr, _ := rmap["isError"].(bool); isErr {
-				// Surface the first failing leaf and stop; partial results
-				// would muddle the error contract.
-				return rmap, nil
-			}
-			meta, _ := rmap["_meta"].(map[string]any)
-			entries, _ := meta["entries"].([]fsproto.DirEntry)
-			walks = append(walks, lsWalk{Path: cur, Entries: entries})
-			if !recursive {
-				continue
-			}
-			curDepth := seenDepth[cur]
-			if depth > 0 && curDepth >= depth {
-				continue
-			}
-			for _, e := range entries {
-				if e.Type != "dir" {
-					continue
-				}
-				sub := path.Join(cur, e.Name)
-				if _, dup := seenDepth[sub]; dup {
-					continue
-				}
-				seenDepth[sub] = curDepth + 1
-				queue = append(queue, sub)
-			}
+	var res any
+	queue := []string{root}
+	seenDepth := map[string]int{root: 0}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		r, err := invokeRouted(ctx, opts, "list_dir", map[string]any{"path": cur})
+		if err != nil {
+			printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
+			return err
 		}
-		return nil, nil
-	})
-	if err != nil {
-		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
-		return err
+		rmap, ok := r.(map[string]any)
+		if !ok {
+			printErrorJSON(cmd.ErrOrStderr(), "protocol_error", fmt.Sprintf("ls: unexpected handler shape: %T", r), false)
+			return fmt.Errorf("ls: unexpected handler shape: %T", r)
+		}
+		if isErr, _ := rmap["isError"].(bool); isErr {
+			// Surface the first failing leaf and stop; partial results
+			// would muddle the error contract.
+			res = rmap
+			break
+		}
+		meta, _ := rmap["_meta"].(map[string]any)
+		entries, _ := coerceDirEntries(meta["entries"])
+		walks = append(walks, lsWalk{Path: cur, Entries: entries})
+		if !recursive {
+			continue
+		}
+		curDepth := seenDepth[cur]
+		if depth > 0 && curDepth >= depth {
+			continue
+		}
+		for _, e := range entries {
+			if e.Type != "dir" {
+				continue
+			}
+			sub := path.Join(cur, e.Name)
+			if _, dup := seenDepth[sub]; dup {
+				continue
+			}
+			seenDepth[sub] = curDepth + 1
+			queue = append(queue, sub)
+		}
 	}
 	if errMap, ok := res.(map[string]any); ok && errMap != nil {
 		code, message := toolErrorFields(errMap)

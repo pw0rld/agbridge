@@ -22,6 +22,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/e2e"
 	"github.com/pw0rld/agbridge/internal/execproto"
 	"github.com/pw0rld/agbridge/internal/fileproto"
+	"github.com/pw0rld/agbridge/internal/fsproto"
 	"github.com/pw0rld/agbridge/internal/gateway"
 	"github.com/pw0rld/agbridge/internal/handshake"
 	"github.com/pw0rld/agbridge/internal/proto"
@@ -160,7 +161,7 @@ func TestCLIPlatformRoundTrip(t *testing.T) {
 			}
 			switch inner.Type {
 			case proto.FrameTypeCapabilitiesRequest:
-				reply(inner.ReqID, proto.FrameTypeCapabilitiesResponse, capabilities.Capabilities{DefaultWorkingDir: "/srv/project"})
+				reply(inner.ReqID, proto.FrameTypeCapabilitiesResponse, capabilities.Capabilities{DefaultWorkingDir: "/srv/project", ProtocolVersion: 2})
 			case proto.FrameTypeExecRequest:
 				req, err := execproto.DecodeExecRequest(inner.Payload)
 				if err != nil || req.Cwd != "/srv/project/src" || req.Cmd != "/bin/echo" || len(req.Args) != 1 || req.Args[0] != "hello world" {
@@ -189,6 +190,15 @@ func TestCLIPlatformRoundTrip(t *testing.T) {
 				if chunk.Eof {
 					reply(inner.ReqID, proto.FrameTypeFileComplete, fileproto.FileComplete{Size: int64(size), Sha256: fmt.Sprintf("%x", sum)})
 				}
+			case proto.FrameTypeStatRequest:
+				// The bridge probes size before whole-file downloads to
+				// decide sequential vs segmented fetch.
+				mu.Lock()
+				size := int64(len(uploaded))
+				mu.Unlock()
+				reply(inner.ReqID, proto.FrameTypeStatResponse, fsproto.StatResponse{
+					Entry: &fsproto.DirEntry{Name: "data.bin", Type: "file", Size: size},
+				})
 			case proto.FrameTypeDownloadRequest:
 				req, err := fileproto.DecodeDownloadRequest(inner.Payload)
 				if err != nil || req.SrcPath != "/srv/project/data.bin" {

@@ -110,7 +110,10 @@ func TestKeepaliveClosesOnPongTimeout(t *testing.T) {
 	// goroutine should hit PongTimeout and close the conn.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		// Per-Recv ctx timeout must exceed PongTimeout so the conn is
+		// killed by keepalive (or the idle read deadline it implies),
+		// not by the ctx bridge.
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 		_, err := client.Recv(ctx)
 		cancel()
 		if err != nil && err != context.DeadlineExceeded {

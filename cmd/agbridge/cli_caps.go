@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -36,9 +35,7 @@ func runCaps(cmd *cobra.Command, opts cliclient.Options) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), g.timeout)
 	defer cancel()
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		return c.Router().CapabilitiesHandler(ctx, json.RawMessage(`{}`))
-	})
+	res, err := invokeRouted(ctx, opts, "capabilities", nil)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

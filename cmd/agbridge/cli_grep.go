@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -59,21 +58,18 @@ func runGrep(cmd *cobra.Command, pattern, path, glob string, ignoreCase bool, ma
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{
-			"pattern":          pattern,
-			"path":             path,
-			"case_insensitive": ignoreCase,
-		}
-		if glob != "" {
-			argsMap["glob"] = glob
-		}
-		if maxResults > 0 {
-			argsMap["max_results"] = maxResults
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().SearchHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{
+		"pattern":          pattern,
+		"path":             path,
+		"case_insensitive": ignoreCase,
+	}
+	if glob != "" {
+		argsMap["glob"] = glob
+	}
+	if maxResults > 0 {
+		argsMap["max_results"] = maxResults
+	}
+	res, err := invokeRouted(ctx, opts, "search", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

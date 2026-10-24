@@ -1,15 +1,16 @@
 # agbridge quickstart
 
-This walkthrough connects an AI assistant to a remote machine through
-agbridge:
+This walkthrough connects an AI assistant (or just your shell) to a
+remote machine through agbridge:
 
 ```
-AI client -> agbridge bridge -> gateway -> agbridge daemon -> remote machine
+AI agent / shell -> agbridge CLI -> gateway -> agbridge daemon -> remote machine
 ```
 
-The bridge is a local stdio MCP server. The daemon runs on the machine
-where files, commands, and private services live. Both bridge and daemon
-dial the gateway outbound over TLS WebSocket.
+The CLI is one-shot: every command dials the gateway, does its work,
+and exits; every verb also speaks `--json` for machines. The daemon
+runs on the machine where files, commands, and private services live.
+Both CLI and daemon dial the gateway outbound over TLS WebSocket.
 
 ## 0. Before You Start
 
@@ -31,8 +32,9 @@ In the examples below:
 
 - Gateway config lives under `/etc/agbridge`.
 - The daemon is named `lab01`.
-- The bridge is named `peter-laptop`.
-- The daemon is allowed to operate under `/home/me/projects`.
+- The client (bridge credential) is named `peter-laptop`.
+- The daemon is advertised with working dir `/home/me/projects` and
+  exec enabled.
 
 Commands that write under `/etc` or bind port 443 must run with the
 appropriate service permissions. Use `sudo`, a reverse proxy, or a
@@ -56,6 +58,7 @@ Create `/etc/agbridge/gateway.yaml`:
 listen: 0.0.0.0:443
 public_url: wss://gw.example.com/
 audit_path: /var/log/agbridge/audit.jsonl
+metrics_listen: 127.0.0.1:9464   # optional Prometheus endpoint, see docs/deployment.md
 agents: []
 daemons: []
 ```
@@ -81,7 +84,8 @@ agbridge issue-token \
   --config /etc/agbridge/gateway.yaml \
   --role daemon \
   --name lab01 \
-  --allowed-paths /home/me/projects \
+  --exec-enabled \
+  --default-working-dir /home/me/projects \
   --ttl 30 \
   --json
 ```
@@ -117,7 +121,11 @@ Expected log:
 daemon: handshake ok, awaiting Route frames
 ```
 
-## 3. Enroll the Bridge
+On Linux, `enroll` also installs and enables an `agbridge-daemon.service`
+systemd unit (system-level when run as root) so the daemon starts on
+boot; pass `--no-start-service` to skip that.
+
+## 3. Enroll the Client
 
 On the gateway host, issue a bridge token targeting the daemon:
 
@@ -140,132 +148,85 @@ agbridge enroll \
   --state-dir ~/.config/agbridge
 ```
 
-Bridge enrollment writes:
+Client enrollment writes:
 
 ```text
 ~/.config/agbridge/state.json
 ~/.config/agbridge/bridge_noise.key
 ```
 
-Do not start `agbridge bridge` by hand for normal use. Your MCP client
-will spawn it.
-
-## 4. Register the MCP Server
-
-The bridge is a stdio MCP server. Every MCP client needs:
-
-- Command: `agbridge`
-- Args: `bridge --state-dir <state-dir>`
-- Env: none
-
-### Codex CLI
-
-Append to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.agbridge]
-command = "agbridge"
-args = ["bridge", "--state-dir", "/home/peter/.config/agbridge"]
-```
-
-Restart Codex.
-
-### Claude Code
+Verify the whole path end to end:
 
 ```bash
-claude mcp add agbridge agbridge -- bridge --state-dir /home/peter/.config/agbridge
+agbridge doctor
+agbridge -t lab01 exec -- uname -a
 ```
 
-Restart Claude Code or start a fresh session.
+## 4. Run Commands
 
-### Cline, Continue, and Generic JSON Clients
+The `-t` flag picks the target (the daemon name). From a tool
+reference point of view the CLI verbs are the tools:
 
-```json
-{
-  "mcpServers": {
-    "agbridge": {
-      "command": "agbridge",
-      "args": ["bridge", "--state-dir", "/home/peter/.config/agbridge"]
-    }
-  }
-}
+```bash
+agbridge -t lab01 caps                  # daemon policy + capabilities
+agbridge -t lab01 ls /home/me/projects
+agbridge -t lab01 grep "TODO" /home/me/projects
+agbridge -t lab01 exec -- go test ./...
+agbridge -t lab01 put ./build.tar.gz /tmp/build.tar.gz
+agbridge -t lab01 get /var/log/app.log ./app.log
 ```
 
-Restart the client so it reloads the MCP tool list.
+For scripts and AI agents, add `--json`: stdout is then exactly one
+JSON object on both the success and the failure path, and stderr
+carries a structured `{"code","message","retry_safe"}` line:
 
-## 5. Try It
-
-Ask the AI client to list MCP tools. You should see tools like:
-
-```text
-capabilities
-exec
-exec_start / exec_status / exec_logs / exec_kill / exec_list
-read_file / write_file / edit_file
-search
-list_directory / stat
-upload / download
-port_forward / port_forward_list / port_forward_close
+```bash
+agbridge -t lab01 --json exec -- git rev-parse HEAD
 ```
 
-Useful first prompts:
+To let an AI agent drive the CLI itself, paste `agbridge ai-help`
+into its system prompt — it is a ready-made tool cheatsheet. See
+[examples/ai-agent-cli.md](examples/ai-agent-cli.md) for the full
+machine-mode contract and retry recipes.
 
-```text
-Use agbridge.capabilities and tell me what remote paths you can access.
+## 5. Speed It Up (Optional)
+
+Each one-shot command pays a full connect+handshake. Running the
+local **agent broker** once per machine makes subsequent commands
+reuse hot connections:
+
+```bash
+agbridge agent          # foreground; templates for login-start in examples/services/
 ```
 
-```text
-Use agbridge.list_directory on /home/me/projects.
-```
+The CLI uses the broker automatically whenever its socket exists —
+no other flags change.
 
-```text
-Use agbridge.search for "TODO" under /home/me/projects.
-```
+## CLI Verb Reference
 
-```text
-Use agbridge.exec to run "go test ./..." in /home/me/projects/myrepo.
-```
-
-## Tool Reference
-
-| Tool | Use it for | Notes |
+| Verb | Use it for | Notes |
 |---|---|---|
-| `capabilities` | Inspect daemon policy | Best first call in a new session |
-| `exec` | Run one command | Non-interactive; default timeout is 5 minutes |
-| `exec_start` / `_status` / `_logs` / `_kill` / `_list` | Manage background processes | For dev servers, watchers, and long-running jobs |
-| `read_file` | Read remote text or binary | Inline cap 10 MiB; supports `offset` and `limit` |
-| `write_file` | Write small files | Use `content` for text, `content_b64` for binary |
-| `edit_file` | Replace text in place | Atomic rewrite, backup retained |
-| `search` | Search file contents | Structured results; skips common cache/build dirs |
-| `list_directory` / `stat` | Inspect filesystem | Avoids shell quoting and output parsing |
-| `upload` | Send files to daemon | `local_path`, `url`, or inline `chunks`; cap 1 GiB |
-| `download` | Bring files back to bridge host | Use `dest_path` for files over 10 MiB |
-| `port_forward` / `_list` / `_close` | Forward local TCP to daemon side | Remote port denylist is enforced by daemon policy |
+| `caps` | Inspect daemon policy | Best first call in a new setup |
+| `exec` | Run one command | Non-interactive, no TTY; `--cwd`, `--env`, `--exec-timeout` |
+| `cat` / `stat` / `ls` / `grep` | Inspect remote files & contents | Inline results capped at 10 MiB |
+| `write` / `edit` | Write a file / replace text in place | `edit` is an atomic rewrite with backup |
+| `put` / `get` | Move whole files | No 10 MiB cap; `get` parallelises at ≥16 MiB |
+| `cd` / `pwd` | Session working directory | Stored per target in client state |
+| `targets` / `status` / `doctor` / `caps` | Self-service diagnostics | All support `--json` |
 
-## Progress Notifications
-
-`exec`, `read_file`, and `download` emit MCP
-`notifications/progress` events when the client supplies
-`_meta.progressToken`.
-
-File progress reports bytes received so far. Exec progress reports
-streamed output chunks. Clients that do not send a progress token get
-the same final results without progress events.
+The full flag-level reference is `agbridge <verb> --help` and
+[README.md](README.md#cli-reference).
 
 ## Troubleshooting
 
-### `agbridge daemon` says `either --state-dir or --config is required`
+### `unknown_target`
 
-Pass the state directory explicitly:
+`-t` names a daemon that is not in your local state. List what this
+client may talk to:
 
 ```bash
-agbridge daemon --state-dir ~/.config/agbridge
+agbridge targets
 ```
-
-### Client says `tool not found`
-
-Restart the AI client. Most MCP clients read the tool list only at
-startup.
 
 ### Daemon never reaches `handshake ok`
 
@@ -286,34 +247,36 @@ agbridge gateway-revoke --config /etc/agbridge/gateway.yaml --name lab01
 
 Then send SIGHUP to the running gateway process.
 
-### `path_forbidden`
+### `tool_forbidden` on `exec`
 
-The daemon policy does not allow that path. Use `capabilities` to inspect
-allowed paths, or issue a new daemon token with a narrower or wider
-policy and re-enroll the daemon.
+The daemon was enrolled from a token issued without `--exec-enabled`,
+so it refuses `exec` outright. Policy is baked in at issue time:
+re-issue the daemon token with `--exec-enabled` and re-enroll.
+Beyond that gate the daemon has no path allowlist — file and command
+access is exactly what the daemon's (unprivileged, never-root) OS
+user can do.
 
 ### `exceeds_max_size`
 
-Inline results are capped:
-
-- `read_file`: 10 MiB
-- `write_file`: 10 MiB
-- inline `download`: 10 MiB
-- `exec` stdout and stderr: 10 MiB each on the bridge side
-
-For large reads, use `read_file` with `offset` and `limit`, or
-`download` with `dest_path`.
+Inline results are capped at 10 MiB: `cat` (file content) and
+`write` / `edit` payloads. `exec` stdout/stderr are additionally
+truncated at 1 MiB per stream. Move whole files with `put` / `get`
+instead — they stream in chunks and have no such cap.
 
 ### State Locations
 
 | Role | Files |
 |---|---|
 | daemon | `~/.config/agbridge/state.json`, `daemon_noise.key` |
-| bridge | `~/.config/agbridge/state.json`, `bridge_noise.key` |
+| client (bridge) | `~/.config/agbridge/state.json`, `bridge_noise.key` |
 | gateway | `gateway.yaml`, `gateway-state.json`, `tokens.json`, audit JSONL |
 
 ## Going Further
 
 - [README](README.md): architecture, security model, and CLI reference.
+- [docs/deployment.md](docs/deployment.md): production gateway hosting,
+  credential lifecycle, monitoring.
+- [examples/](examples/): AI-agent/`--json` cookbook and login-start
+  service templates.
 - [ROADMAP](ROADMAP.md): shipped work and known next items.
 - `agbridge --help`: command and flag reference.

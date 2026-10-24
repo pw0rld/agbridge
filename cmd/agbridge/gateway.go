@@ -71,9 +71,21 @@ func newGatewayCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("token store: %w", err)
 			}
-			gwState := hydrateGatewayState(cfg, tokensPath)
+			// Prune used/expired enrollment tokens; without this the
+			// store only ever grows.
+			go tokenStore.GCLoop(ctx, 0, 0, func(err error) {
+				fmt.Fprintf(os.Stderr, "gateway: token GC: %v\n", err)
+			})
+			// enrollBase must stay config-derived: EnrollServer rebuilds
+			// state as base ⊕ the on-disk file on every write, so letting
+			// persisted-only entries leak into base would flush back
+			// devices a sibling CLI already revoked.
+			enrollBase := hydrateGatewayState(cfg, tokensPath)
+			// A separate copy folds gateway-state.json in and mutates cfg,
+			// so the CredRegistry built below authenticates enrolled devices.
+			regState := hydrateGatewayState(cfg, tokensPath)
 			if prior, err := state.LoadGateway(gwStatePath); err == nil {
-				mergeGatewayState(gwState, prior, cfg)
+				mergeGatewayState(regState, prior, cfg)
 			}
 			publicURL := cfg.PublicURL
 			if publicURL == "" {
@@ -81,11 +93,11 @@ func newGatewayCmd() *cobra.Command {
 			}
 			enrollSrv := &gateway.EnrollServer{
 				Tokens:        tokenStore,
-				State:         gwState,
 				StatePath:     gwStatePath,
 				GatewayURL:    publicURL,
 				CertPinSource: func() string { return pin },
 			}
+			enrollSrv.SetBase(enrollBase)
 
 			mux := http.NewServeMux()
 			mux.HandleFunc("/v1/enroll", enrollSrv.HandleEnroll)
@@ -96,8 +108,18 @@ func newGatewayCmd() *cobra.Command {
 			}
 			// Wire EnrollServer to the live CredRegistry so onboarded
 			// devices take effect immediately (no SIGHUP needed).
-			enrollSrv.Live = inst.Creds
+			enrollSrv.SetLive(inst.Creds)
 			fmt.Fprintf(os.Stderr, "gateway listening on %s (enroll endpoint at /v1/enroll)\n", inst.Addr)
+
+			// Optional Prometheus endpoint. Unauthenticated plain HTTP,
+			// so it only exists when the operator opts in via
+			// metrics_listen (bind to localhost / mgmt network only).
+			if cfg.MetricsListen != "" {
+				if _, err := gateway.ServeMetrics(ctx, cfg.MetricsListen, inst.Metrics); err != nil {
+					return fmt.Errorf("metrics listener: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "gateway metrics on http://%s/metrics\n", cfg.MetricsListen)
+			}
 
 			hupCh := make(chan os.Signal, 1)
 			signal.Notify(hupCh, syscall.SIGHUP)
@@ -113,12 +135,18 @@ func newGatewayCmd() *cobra.Command {
 							fmt.Fprintf(os.Stderr, "SIGHUP: reload failed: %v\n", err)
 							continue
 						}
+						// Capture the pristine config baseline before the
+						// merge mutates newCfg, then hand it to the enroll
+						// endpoint so new enrollments merge against the
+						// reloaded config, not the startup one.
+						newBase := hydrateGatewayState(newCfg, tokensPath)
 						// Re-merge gateway-state.json so enrolled devices
 						// don't disappear from CredRegistry across reload.
 						freshState := hydrateGatewayState(newCfg, tokensPath)
 						if prior, err := state.LoadGateway(gwStatePath); err == nil {
 							mergeGatewayState(freshState, prior, newCfg)
 						}
+						enrollSrv.SetBase(newBase)
 						inst.Creds.Replace(newCfg)
 						revoked := inst.Sessions.Revoke(inst.Creds)
 						if len(revoked) > 0 {

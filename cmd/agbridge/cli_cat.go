@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -48,13 +47,10 @@ func runCat(cmd *cobra.Command, path string, offset, limit int64, opts cliclient
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{
-			"path":   path,
-			"offset": offset,
-			"limit":  limit,
-		})
-		return c.Router().ReadFileHandler(ctx, argsJSON)
+	res, err := invokeRouted(ctx, opts, "read_file", map[string]any{
+		"path":   path,
+		"offset": offset,
+		"limit":  limit,
 	})
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)

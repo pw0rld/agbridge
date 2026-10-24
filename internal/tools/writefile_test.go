@@ -65,6 +65,46 @@ func TestWriteFileHappy(t *testing.T) {
 	}
 }
 
+func TestWriteFileMasksSpecialModeBits(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		in   uint32
+		want os.FileMode
+	}{
+		{"setuid", 0o4755, 0o755},
+		{"setgid", 0o2644, 0o644},
+		{"sticky", 0o1777, 0o777},
+		{"all", 0o7777, 0o777},
+		{"plain", 0o600, 0o600},
+		{"zero-defaults", 0, 0o644},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, "out-"+tc.name)
+			complete, err := WriteFile(context.Background(),
+				fileproto.FileWriteRequest{Path: path, Mode: tc.in}, 1<<20,
+				chunksFrom([]byte("x"), 16))
+			if err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if complete.Err != "" {
+				t.Fatalf("complete.Err: %q", complete.Err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != tc.want {
+				t.Errorf("mode: %v, want %v", info.Mode().Perm(), tc.want)
+			}
+			if info.Mode()&os.ModeSetuid != 0 || info.Mode()&os.ModeSetgid != 0 || info.Mode()&os.ModeSticky != 0 {
+				t.Errorf("special bits survived: %v", info.Mode())
+			}
+		})
+	}
+}
+
 func TestWriteFileChunked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.bin")

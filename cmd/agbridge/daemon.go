@@ -157,7 +157,7 @@ func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCf
 	if err != nil {
 		return nil, err
 	}
-	hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken}
+	hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken, ProtocolVersion: handshake.ProtocolVersion}
 	helloPayload, _ := hello.Encode()
 	if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
 		_ = conn.Close()
@@ -234,6 +234,10 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		streams: make(map[string]*streamSlot),
 		bgReg:   tools.NewBgRegistry(),
 	}
+	// Reaper for finished background processes: without it, every
+	// bg.exec that ever ran keeps up to 2 MiB of output buffers pinned
+	// for the daemon's whole lifetime.
+	go state.bgReg.GCLoop(sessionCtx, 0)
 	for {
 		f, err := conn.Recv(sessionCtx)
 		if err != nil {
@@ -246,6 +250,9 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		case proto.FrameTypeRoute:
 			innerBytes, err := state.unwrapRoute(f.Payload)
 			if err != nil {
+				if errors.Is(err, errPlaintextRoute) {
+					fmt.Fprintf(os.Stderr, "daemon: refused plaintext route under e2e_mode=%s\n", state.e2e.mode)
+				}
 				continue
 			}
 			inner, err := proto.Decode(innerBytes)
@@ -323,7 +330,7 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleSearch(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
-	case proto.FrameTypeFileChunk:
+	case proto.FrameTypeFileChunk, proto.FrameTypeFileChunkBin:
 		s.deliverFileChunk(ctx, inner)
 	case proto.FrameTypeStreamOpen:
 		req, err := streamproto.DecodeStreamOpen(inner.Payload)
@@ -370,10 +377,21 @@ func (s *daemonState) sendInner(ctx context.Context, inner proto.Frame) {
 	_ = s.conn.Send(ctx, proto.Frame{Type: proto.FrameTypeRoute, Payload: payload})
 }
 
+// errPlaintextRoute is returned when the gateway delivers a plaintext
+// Route payload but the daemon runs with e2e configured. Only e2e_mode
+// == "disabled" (s.e2e == nil, legacy mode with a documented
+// gateway-sees-everything trust stance) accepts plaintext inner frames.
+var errPlaintextRoute = errors.New("plaintext Route refused: e2e is configured")
+
 // unwrapRoute extracts the inner frame bytes from a Route payload. If a
 // session is active the payload is AEAD-decrypted (after stripping the
-// 8-byte session_id prefix). When e2e_mode == "required" and no session
-// exists, plaintext Route is rejected outright.
+// 8-byte session_id prefix). When e2e is configured (optional or
+// required) and no session exists, plaintext Route is rejected outright:
+// the gateway is explicitly modelled as a potential attacker
+// (THREAT-MODEL "Compromised gateway"), and accepting unauthenticated
+// plaintext frames in optional mode would let a hostile gateway inject
+// tool calls — including exec — before or instead of a real Noise
+// session.
 func (s *daemonState) unwrapRoute(payload []byte) ([]byte, error) {
 	s.sessionMu.Lock()
 	sess := s.session
@@ -381,8 +399,8 @@ func (s *daemonState) unwrapRoute(payload []byte) ([]byte, error) {
 	s.sessionMu.Unlock()
 
 	if sess == nil {
-		if s.e2e != nil && s.e2e.mode == "required" {
-			return nil, errors.New("plaintext Route refused under e2e_mode=required")
+		if s.e2e != nil {
+			return nil, errPlaintextRoute
 		}
 		return payload, nil
 	}
@@ -508,6 +526,8 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 		MaxFileBytes:      maxFileBytes,
 		AgbridgeVersion:   agbridgeVersion,
 		DefaultWorkingDir: effectiveDefaultWorkingDir(s.cfg),
+		ProtocolVersion:   handshake.ProtocolVersion,
+		BinaryChunks:      true,
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
@@ -578,12 +598,9 @@ func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
 		return
 	}
 	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can flow.
-	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit}
-	onChunk := func(c fileproto.FileChunk) {
-		payload, _ := c.Encode()
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
-	}
-	complete, _ := tools.ReadFile(ctx, rdReq, tools.UploadMaxBytes, onChunk)
+	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit, Binary: req.Binary}
+	sendChunk := chunkSender(ctx, s, inner.ReqID, req.Binary)
+	complete, _ := tools.ReadFile(ctx, rdReq, tools.UploadMaxBytes, sendChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
@@ -642,12 +659,23 @@ func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {
 		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
 		return
 	}
-	onChunk := func(c fileproto.FileChunk) {
-		payload, _ := c.Encode()
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
-	}
-	complete, _ := tools.ReadFile(ctx, req, maxFileBytes, onChunk)
+	sendChunk := chunkSender(ctx, s, inner.ReqID, req.Binary)
+	complete, _ := tools.ReadFile(ctx, req, maxFileBytes, sendChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+// chunkSender returns the onChunk callback for read/download responses:
+// binary chunk frames when the request asked for them (the bridge only
+// does when it supports FrameTypeFileChunkBin), JSON encoding otherwise.
+func chunkSender(ctx context.Context, s *daemonState, reqID string, binary bool) func(fileproto.FileChunk) {
+	return func(c fileproto.FileChunk) {
+		if binary {
+			s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunkBin, ReqID: reqID, Payload: fileproto.EncodeChunkBinary(c)})
+			return
+		}
+		payload, _ := c.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload})
+	}
 }
 
 func (s *daemonState) beginWrite(reqID string) *writeSlot {
@@ -693,7 +721,13 @@ func (s *daemonState) deliverFileChunk(ctx context.Context, inner proto.Frame) {
 	if !ok {
 		return
 	}
-	c, err := fileproto.DecodeFileChunk(inner.Payload)
+	var c fileproto.FileChunk
+	var err error
+	if inner.Type == proto.FrameTypeFileChunkBin {
+		c, err = fileproto.DecodeChunkBinary(inner.Payload)
+	} else {
+		c, err = fileproto.DecodeFileChunk(inner.Payload)
+	}
 	if err != nil {
 		return
 	}

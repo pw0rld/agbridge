@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,6 +32,13 @@ import (
 //       reached runtime with e2e_mode=required + empty allowlist, the
 //       peer check still rejects every connection. Tested by:
 //       TestPeerAllowedRejectsAllWhenRequiredAndEmpty.
+//
+//   I4. With e2e configured (optional OR required), an unauthenticated
+//       plaintext Route frame is refused before dispatch — a
+//       compromised gateway cannot inject tool calls (including exec)
+//       outside a Noise session. Only legacy e2e_mode=disabled runs
+//       plaintext. Tested by:
+//       TestUnwrapRouteRefusesPlaintextWhenE2EConfigured.
 
 func TestPeerAllowedNilE2E(t *testing.T) {
 	s := &daemonState{e2e: nil}
@@ -90,6 +98,26 @@ func TestPeerAllowedRejectsNearMatchPubkey(t *testing.T) {
 	}}
 	if s.peerAllowed(tampered) {
 		t.Errorf("one-bit-different pubkey must be rejected")
+	}
+}
+
+func TestUnwrapRouteRefusesPlaintextWhenE2EConfigured(t *testing.T) {
+	// Invariant I4: with a session-less connection, plaintext Route
+	// payloads must be refused in every e2e mode that has Noise
+	// configured, so a hostile gateway cannot reach dispatch() — and
+	// therefore handleExec et al — without a Noise session.
+	for _, mode := range []string{"optional", "required"} {
+		s := &daemonState{e2e: &daemonE2EDeps{mode: mode}}
+		if _, err := s.unwrapRoute([]byte("forged-plaintext-route")); !errors.Is(err, errPlaintextRoute) {
+			t.Errorf("e2e_mode=%s: plaintext route accepted (err=%v), want errPlaintextRoute", mode, err)
+		}
+	}
+	// Legacy disabled mode (e2e == nil) deliberately still accepts
+	// plaintext; that mode's docs state the gateway sees everything.
+	s := &daemonState{e2e: nil}
+	got, err := s.unwrapRoute([]byte("legacy-plaintext-route"))
+	if err != nil || string(got) != "legacy-plaintext-route" {
+		t.Errorf("disabled mode must pass plaintext through, got %q err %v", got, err)
 	}
 }
 

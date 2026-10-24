@@ -15,6 +15,16 @@ type Capabilities struct {
 	MaxFileBytes      int64    `json:"max_file_bytes"`
 	AgbridgeVersion   string   `json:"agbridge_version,omitempty"`
 	DefaultWorkingDir string   `json:"default_working_dir,omitempty"`
+	// ProtocolVersion mirrors handshake.ProtocolVersion so a bridge can
+	// detect a pre-working-directory daemon even when an old gateway
+	// relays the pairing without checking. Absent (0) means v0.0.4 or
+	// older.
+	ProtocolVersion uint8 `json:"protocol_version,omitempty"`
+	// BinaryChunks advertises that the daemon accepts and prefers
+	// proto.FrameTypeFileChunkBin (raw-bytes chunk encoding, no base64
+	// expansion). Additive flag: absent/false on daemons predating it,
+	// so bridges keep using the FrameTypeFileChunk JSON encoding.
+	BinaryChunks bool `json:"binary_chunks,omitempty"`
 }
 
 func (c Capabilities) Encode() ([]byte, error) { return json.Marshal(c) }

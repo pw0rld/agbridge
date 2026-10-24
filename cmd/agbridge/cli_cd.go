@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"github.com/pw0rld/agbridge/internal/cliclient"
-	"github.com/pw0rld/agbridge/internal/fsproto"
 )
 
 // newPwdCmd prints the CLI's current working directory (bootstrapping it
@@ -79,7 +77,7 @@ func runCd(cmd *cobra.Command, arg string, opts cliclient.Options) error {
 		printErrorJSON(cmd.ErrOrStderr(), "not_a_directory", err.Error(), false)
 		return err
 	}
-	if err := setWorkingDir(target); err != nil {
+	if err := setWorkingDir(opts.Target, target); err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "state_unwritable", err.Error(), false)
 		return err
 	}
@@ -93,10 +91,9 @@ func runCd(cmd *cobra.Command, arg string, opts cliclient.Options) error {
 
 // statIsDir stats target on the daemon and returns nil iff it is a directory.
 func statIsDir(ctx context.Context, opts cliclient.Options, target string) error {
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{"path": target})
-		return c.Router().StatHandler(ctx, argsJSON)
-	})
+	// follow=true: a symlink pointing at a directory is a valid cd
+	// target; only the resolved target's type matters here.
+	res, err := invokeRouted(ctx, opts, "stat", map[string]any{"path": target, "follow": true})
 	if err != nil {
 		return err
 	}
@@ -109,7 +106,7 @@ func statIsDir(ctx context.Context, opts cliclient.Options, target string) error
 		return fmt.Errorf("%s: %s", code, message)
 	}
 	meta, _ := rmap["_meta"].(map[string]any)
-	entry, ok := meta["entry"].(*fsproto.DirEntry)
+	entry, ok := coerceDirEntry(meta["entry"])
 	if !ok || entry == nil {
 		return fmt.Errorf("stat %s: no entry returned", target)
 	}

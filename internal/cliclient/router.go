@@ -47,7 +47,13 @@ type Router struct {
 	conn      *wss.Conn
 	session   *e2e.Session // active E2E session (nil before handshake / after disconnect)
 	sessionID [8]byte      // bound to session
-	pending   map[string]chan proto.Frame
+	pending   map[string]*pendingCall
+
+	// capsMu guards capsBinaryChunks, the cached result of the
+	// daemon's capabilities.BinaryChunks advertisement (see
+	// supportsBinaryChunks in handlers_meta.go). nil = never probed.
+	capsMu           sync.Mutex
+	capsBinaryChunks *bool
 
 	// evicted is set when the gateway tells us a newer bridge with the
 	// same identity has taken over (errFrame "session_replaced"). The
@@ -74,7 +80,7 @@ func NewRouter(ctx context.Context, conn *wss.Conn, apiKey []byte, cfg *config.B
 		conn:    conn,
 		apiKey:  apiKey,
 		e2eMode: cfg.E2EMode,
-		pending: make(map[string]chan proto.Frame),
+		pending: make(map[string]*pendingCall),
 	}
 	if cfg.E2EMode != "disabled" {
 		sk, err := e2e.LoadStatic(cfg.BridgeStaticKeyPath)
@@ -114,6 +120,17 @@ func (r *Router) currentConn() *wss.Conn {
 	return r.conn
 }
 
+// pendingCall is one in-flight request: the channel the handler reads
+// frames from, plus a done signal closed when the handler returns.
+// Without done, a handler that walks away mid-stream (Ctrl-C during a
+// large download, request timeout) would leave runReader blocked on a
+// full channel forever, wedging every later request on the same
+// connection — which on the agent broker is a pooled, long-lived one.
+type pendingCall struct {
+	ch   chan proto.Frame
+	done chan struct{}
+}
+
 // replaceConn swaps in newConn and closes every pending call channel so
 // the in-flight handler returns network_lost. The CLI Client never
 // calls this in steady state (one-shot lifecycle), but keeping it
@@ -121,14 +138,15 @@ func (r *Router) currentConn() *wss.Conn {
 func (r *Router) replaceConn(newConn *wss.Conn) {
 	r.mu.Lock()
 	old := r.pending
-	r.pending = make(map[string]chan proto.Frame)
+	r.pending = make(map[string]*pendingCall)
 	r.conn = newConn
 	// On disconnect, throw away E2E session keys (forward secrecy).
 	r.session = nil
 	r.sessionID = [8]byte{}
 	r.mu.Unlock()
-	for _, ch := range old {
-		close(ch)
+	for _, pc := range old {
+		close(pc.done) // wake runReader before its channel disappears
+		close(pc.ch)
 	}
 }
 
@@ -239,11 +257,16 @@ func (r *Router) runReader() {
 			continue
 		}
 		r.mu.Lock()
-		ch, ok := r.pending[inner.ReqID]
+		pc, ok := r.pending[inner.ReqID]
 		r.mu.Unlock()
 		if ok {
 			select {
-			case ch <- inner:
+			case pc.ch <- inner:
+			case <-pc.done:
+				// The handler returned (timeout, cancellation, error) and
+				// nobody will drain this frame. Drop it instead of
+				// blocking the shared reader; the connection stays usable
+				// for every other in-flight call.
 			case <-r.ctx.Done():
 				return
 			}
@@ -252,17 +275,27 @@ func (r *Router) runReader() {
 }
 
 func (r *Router) registerCall(reqID string) <-chan proto.Frame {
-	ch := make(chan proto.Frame, 64)
+	pc := &pendingCall{
+		ch:   make(chan proto.Frame, 64),
+		done: make(chan struct{}),
+	}
 	r.mu.Lock()
-	r.pending[reqID] = ch
+	r.pending[reqID] = pc
 	r.mu.Unlock()
-	return ch
+	return pc.ch
 }
 
+// unregisterCall drops the registration and wakes runReader if it is
+// currently blocked handing a frame to this call. Closing done is what
+// makes an abandoned transfer harmless to the rest of the connection.
 func (r *Router) unregisterCall(reqID string) {
 	r.mu.Lock()
+	pc, ok := r.pending[reqID]
 	delete(r.pending, reqID)
 	r.mu.Unlock()
+	if ok {
+		close(pc.done)
+	}
 }
 
 // registerStream / unregisterStream are aliases reserved for future
