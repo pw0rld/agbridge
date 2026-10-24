@@ -139,10 +139,11 @@ func dial(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("wss dial: %w", err)
 	}
 	helloBytes, err := handshake.Hello{
-		Role:         "bridge",
-		Name:         opts.AgentName,
-		Secret:       opts.APIKey,
-		TargetDaemon: opts.Target,
+		Role:            "bridge",
+		Name:            opts.AgentName,
+		Secret:          opts.APIKey,
+		TargetDaemon:    opts.Target,
+		ProtocolVersion: handshake.ProtocolVersion,
 	}.Encode()
 	if err != nil {
 		_ = conn.Close()

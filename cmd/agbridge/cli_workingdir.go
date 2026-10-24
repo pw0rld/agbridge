@@ -104,5 +104,12 @@ func fetchDefaultWorkingDir(ctx context.Context, opts cliclient.Options) (string
 	if !ok {
 		return "", errors.New("capabilities: missing snapshot")
 	}
+	// Second line of defence behind the gateway's pairing check: an old
+	// gateway relays without version checks, and a pre-v0.0.5 daemon
+	// advertises no default_working_dir — bootstrapping "/" from it would
+	// silently mis-resolve every relative path. Fail loudly instead.
+	if caps.ProtocolVersion < 2 {
+		return "", errors.New("daemon speaks protocol v1 (agbridge <= v0.0.4, no working-directory support); upgrade the daemon")
+	}
 	return caps.DefaultWorkingDir, nil
 }

@@ -119,7 +119,7 @@ func handleDaemon(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name})
 		return
 	}
-	proxy := NewDaemonProxy(c)
+	proxy := NewDaemonProxy(c, h.ProtocolVersion)
 	if err := reg.Register(h.Name, proxy); err != nil {
 		_ = c.Send(ctx, errFrame("duplicate_daemon"))
 		_ = aud.Append(map[string]any{"event": "auth_failed", "role": "daemon", "name": h.Name, "reason": "duplicate"})
@@ -202,6 +202,18 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	if !ok {
 		_ = c.Send(ctx, errFrame("daemon_offline"))
 		_ = aud.Append(map[string]any{"event": "route_failed", "reason": "daemon_offline", "target": h.TargetDaemon})
+		return
+	}
+	// Cross-generation pairing is refused: a v0.0.3-bridge believes the
+	// daemon still enforces path allowlists, and a v0.0.5-bridge would
+	// bootstrap a working directory from a daemon that has none. Neither
+	// failure is visible to the peers without an explicit rejection.
+	if bridgeVer := h.EffectiveVersion(); bridgeVer != proxy.ProtoVersion() {
+		_ = c.Send(ctx, errFrame("protocol_mismatch"))
+		_ = aud.Append(map[string]any{
+			"event": "route_failed", "reason": "protocol_mismatch", "target": h.TargetDaemon,
+			"bridge_version": bridgeVer, "daemon_version": proxy.ProtoVersion(),
+		})
 		return
 	}
 

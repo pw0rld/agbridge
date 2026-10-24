@@ -157,7 +157,7 @@ func daemonDialAndHandshake(ctx context.Context, cfg *config.DaemonConfig, tlsCf
 	if err != nil {
 		return nil, err
 	}
-	hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken}
+	hello := handshake.Hello{Role: "daemon", Name: cfg.DaemonName, Secret: cfg.RegistrationToken, ProtocolVersion: handshake.ProtocolVersion}
 	helloPayload, _ := hello.Encode()
 	if err := conn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: helloPayload}); err != nil {
 		_ = conn.Close()
@@ -508,6 +508,7 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 		MaxFileBytes:      maxFileBytes,
 		AgbridgeVersion:   agbridgeVersion,
 		DefaultWorkingDir: effectiveDefaultWorkingDir(s.cfg),
+		ProtocolVersion:   handshake.ProtocolVersion,
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})

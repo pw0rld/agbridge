@@ -19,7 +19,7 @@ func (s *stubConn) Close() error                              { s.closed = true;
 func TestRegistryRegisterLookupUnregister(t *testing.T) {
 	r := NewRegistry()
 	c := &stubConn{}
-	p := NewDaemonProxy(c)
+	p := NewDaemonProxy(c, 0)
 	if err := r.Register("lab01", p); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -35,21 +35,21 @@ func TestRegistryRegisterLookupUnregister(t *testing.T) {
 
 func TestRegistryRejectsDuplicate(t *testing.T) {
 	r := NewRegistry()
-	_ = r.Register("lab01", NewDaemonProxy(&stubConn{}))
-	if err := r.Register("lab01", NewDaemonProxy(&stubConn{})); err == nil {
+	_ = r.Register("lab01", NewDaemonProxy(&stubConn{}, 0))
+	if err := r.Register("lab01", NewDaemonProxy(&stubConn{}, 0)); err == nil {
 		t.Errorf("expected duplicate-registration error")
 	}
 }
 
 func TestDaemonProxyDropsWhenNoWriter(t *testing.T) {
-	p := NewDaemonProxy(&stubConn{})
+	p := NewDaemonProxy(&stubConn{}, 0)
 	if err := p.Deliver(context.Background(), proto.Frame{Type: proto.FrameTypePing}); err != nil {
 		t.Errorf("Deliver with no writer should be a no-op, got %v", err)
 	}
 }
 
 func TestDaemonProxySetAndClearWriter(t *testing.T) {
-	p := NewDaemonProxy(&stubConn{})
+	p := NewDaemonProxy(&stubConn{}, 0)
 	delivered := 0
 	p.SetWriter(func(_ context.Context, _ proto.Frame) error { delivered++; return nil })
 	_ = p.Deliver(context.Background(), proto.Frame{Type: proto.FrameTypePing})

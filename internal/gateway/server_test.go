@@ -119,6 +119,62 @@ func TestHandshakeBridgeBadSecret(t *testing.T) {
 // a session_replaced error frame to the older bridge before closing its
 // conn. Without this signal the older bridge's supervisor would
 // auto-reconnect and enter a kick-storm with the newer instance.
+// TestBridgeDaemonProtocolMismatchRefused registers a generation-2 daemon,
+// then connects a generation-1 bridge (Hello wire bytes without the
+// trailing version byte, exactly what v0.0.3 clients send) and asserts the
+// gateway pushes protocol_mismatch instead of relaying.
+func TestBridgeDaemonProtocolMismatchRefused(t *testing.T) {
+	srvCfg, cliCfg := testcerts.MustGenerate(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := audit.Open(filepath.Join(t.TempDir(), "a.jsonl"))
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	defer w.Close()
+	cfg := newTestConfig(t)
+	inst, err := Run(ctx, srvCfg, cfg, w)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	u := url.URL{Scheme: "wss", Host: inst.Addr.String(), Path: "/"}
+
+	dconn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("dial daemon: %v", err)
+	}
+	defer dconn.Close()
+	sendHello(t, ctx, dconn, handshake.Hello{Role: "daemon", Name: "lab01", Secret: "daemon-tok-1", ProtocolVersion: 2})
+	if ack, err := dconn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("daemon hello ack: %v %v", ack.Type, err)
+	}
+
+	bconn, err := wss.Dial(ctx, u.String(), transport.Credentials{}, cliCfg)
+	if err != nil {
+		t.Fatalf("dial bridge: %v", err)
+	}
+	defer bconn.Close()
+	// Simulate a pre-v0.0.5 bridge: valid generation-1 Hello wire, i.e.
+	// everything except the trailing protocol-version byte.
+	payload, err := (handshake.Hello{Role: "bridge", Name: "claude-laptop", Secret: "api-key-1", TargetDaemon: "lab01"}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bconn.Send(ctx, proto.Frame{Type: proto.FrameTypeHello, Payload: payload[:len(payload)-1]}); err != nil {
+		t.Fatal(err)
+	}
+	if ack, err := bconn.Recv(ctx); err != nil || ack.Type != proto.FrameTypeHelloAck {
+		t.Fatalf("bridge hello ack: %v %v", ack.Type, err)
+	}
+	f, err := bconn.Recv(ctx)
+	if err != nil {
+		t.Fatalf("recv mismatch frame: %v", err)
+	}
+	if f.Type != proto.FrameTypeError || string(f.Payload) != "protocol_mismatch" {
+		t.Fatalf("got type=%v payload=%q, want protocol_mismatch error", f.Type, f.Payload)
+	}
+}
+
 func TestBridgeDuplicateIdentitySendsSessionReplaced(t *testing.T) {
 	srvCfg, cliCfg := testcerts.MustGenerate(t)
 	ctx, cancel := context.WithCancel(context.Background())

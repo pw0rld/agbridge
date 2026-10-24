@@ -21,11 +21,25 @@ type DaemonProxy struct {
 	conn connIO
 	mu   sync.Mutex
 	w    func(context.Context, proto.Frame) error
+	// protoVersion is the Hello protocol generation the daemon
+	// advertised at registration (0 = pre-versioning peer = generation 1).
+	// handleBridge refuses to pair bridge and daemon across generations.
+	protoVersion uint8
 }
 
-// NewDaemonProxy wraps an authenticated daemon conn.
-func NewDaemonProxy(c connIO) *DaemonProxy {
-	return &DaemonProxy{conn: c}
+// NewDaemonProxy wraps an authenticated daemon conn. protoVersion is the
+// generation from the daemon's Hello (handshake.DecodeHello yields 0 for
+// pre-versioning peers; callers pass the decoded byte verbatim).
+func NewDaemonProxy(c connIO, protoVersion uint8) *DaemonProxy {
+	return &DaemonProxy{conn: c, protoVersion: protoVersion}
+}
+
+// ProtoVersion returns the daemon's effective protocol generation.
+func (p *DaemonProxy) ProtoVersion() uint8 {
+	if p.protoVersion == 0 {
+		return 1
+	}
+	return p.protoVersion
 }
 
 // Send forwards f to the daemon. Used by handleBridge's main loop.

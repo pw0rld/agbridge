@@ -160,7 +160,7 @@ func TestCLIPlatformRoundTrip(t *testing.T) {
 			}
 			switch inner.Type {
 			case proto.FrameTypeCapabilitiesRequest:
-				reply(inner.ReqID, proto.FrameTypeCapabilitiesResponse, capabilities.Capabilities{DefaultWorkingDir: "/srv/project"})
+				reply(inner.ReqID, proto.FrameTypeCapabilitiesResponse, capabilities.Capabilities{DefaultWorkingDir: "/srv/project", ProtocolVersion: 2})
 			case proto.FrameTypeExecRequest:
 				req, err := execproto.DecodeExecRequest(inner.Payload)
 				if err != nil || req.Cwd != "/srv/project/src" || req.Cmd != "/bin/echo" || len(req.Args) != 1 || req.Args[0] != "hello world" {

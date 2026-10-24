@@ -7,6 +7,14 @@ import (
 	"errors"
 )
 
+// ProtocolVersion is the application-protocol generation this binary
+// speaks. v0.0.3 and earlier implicitly spoke generation 1 (path
+// allowlists, no working-directory model). v0.0.5+ sends 2: the PR #11
+// working-directory rewrite removed daemon-side path enforcement, which
+// silently changes semantics for a mixed-version bridge/daemon pair, so
+// the gateway now refuses to pair generations.
+const ProtocolVersion uint8 = 2
+
 // Hello is the first message sent by bridge or daemon over a freshly
 // dialed WSS connection.
 type Hello struct {
@@ -14,6 +22,20 @@ type Hello struct {
 	Name         string
 	Secret       string // API key (bridge) or registration token (daemon)
 	TargetDaemon string // bridge only; daemon leaves empty
+	// ProtocolVersion is appended as a single trailing byte. Decoders
+	// from generation <=1 never read it (they ignore trailing bytes), so
+	// new→old wire traffic keeps working; a missing byte decodes as 0,
+	// which EffectiveVersion maps to generation 1.
+	ProtocolVersion uint8
+}
+
+// EffectiveVersion normalises a decoded Hello.ProtocolVersion: 0 means a
+// pre-versioning peer (v0.0.3 or earlier), which spoke generation 1.
+func (h Hello) EffectiveVersion() uint8 {
+	if h.ProtocolVersion == 0 {
+		return 1
+	}
+	return h.ProtocolVersion
 }
 
 var ErrHelloMalformed = errors.New("handshake: hello payload malformed")
@@ -25,7 +47,7 @@ const (
 
 // Encode serializes Hello into:
 //
-//	role_len:1B | role:N | name_len:1B | name:N | secret_len:2B | secret:N | target_len:1B | target:N
+//	role_len:1B | role:N | name_len:1B | name:N | secret_len:2B | secret:N | target_len:1B | target:N | proto_version:1B
 func (h Hello) Encode() ([]byte, error) {
 	if len(h.Role) >= maxStrU8 || len(h.Name) >= maxStrU8 || len(h.TargetDaemon) >= maxStrU8 {
 		return nil, errors.New("handshake: role/name/target too long for 1-byte length prefix")
@@ -44,6 +66,11 @@ func (h Hello) Encode() ([]byte, error) {
 	buf = append(buf, h.Secret...)
 	buf = append(buf, byte(len(h.TargetDaemon)))
 	buf = append(buf, h.TargetDaemon...)
+	v := h.ProtocolVersion
+	if v == 0 {
+		v = ProtocolVersion
+	}
+	buf = append(buf, v)
 	return buf, nil
 }
 
@@ -83,6 +110,14 @@ func DecodeHello(b []byte) (Hello, error) {
 	off += sl
 	if h.TargetDaemon, err = read1(); err != nil {
 		return Hello{}, err
+	}
+	// Optional trailing version byte: absent (pre-v0.0.5 sender) stays 0.
+	switch len(b) - off {
+	case 0:
+	case 1:
+		h.ProtocolVersion = b[off]
+	default:
+		return Hello{}, ErrHelloMalformed
 	}
 	return h, nil
 }
