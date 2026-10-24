@@ -94,3 +94,51 @@ func TestDecodeBadJSON(t *testing.T) {
 		t.Error("expected error on bad JSON")
 	}
 }
+
+func TestChunkBinaryCodec(t *testing.T) {
+	cases := []FileChunk{
+		{Data: []byte("hello"), Eof: false},
+		{Data: []byte("last"), Eof: true},
+		{Data: nil, Eof: true}, // zero-length EOF sentinel
+		{Data: []byte{}, Eof: false},
+		{Data: []byte{0x00, 0xFF, 0x01}, Eof: true}, // raw bytes must not be escaped
+	}
+	for _, want := range cases {
+		got, err := DecodeChunkBinary(EncodeChunkBinary(want))
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Eof != want.Eof || string(got.Data) != string(want.Data) {
+			t.Errorf("round trip: got %+v, want %+v", got, want)
+		}
+	}
+	// Binary form must be strictly smaller than JSON+base64 for data.
+	data := make([]byte, 1024)
+	jsonEnc, _ := FileChunk{Data: data}.Encode()
+	if bin := EncodeChunkBinary(FileChunk{Data: data}); len(bin) >= len(jsonEnc) {
+		t.Errorf("binary encoding %d bytes not smaller than JSON %d bytes", len(bin), len(jsonEnc))
+	}
+	if _, err := DecodeChunkBinary(nil); err == nil {
+		t.Error("expected error on empty binary payload")
+	}
+}
+
+func TestRequestBinaryFieldDefaultFalse(t *testing.T) {
+	// Old bridges send requests without the binary field: it must
+	// decode as false so daemons keep the JSON chunk encoding.
+	if rr, err := DecodeFileReadRequest([]byte(`{"path":"/x"}`)); err != nil || rr.Binary {
+		t.Errorf("old read request must default to false: %+v, %v", rr, err)
+	}
+	rd, err := DecodeFileReadRequest([]byte(`{"path":"/x","binary":true}`))
+	if err != nil || !rd.Binary {
+		t.Errorf("read request binary: %+v, %v", rd, err)
+	}
+	dl, err := DecodeDownloadRequest([]byte(`{"src_path":"/x","binary":true}`))
+	if err != nil || !dl.Binary {
+		t.Errorf("download request binary: %+v, %v", dl, err)
+	}
+	old, err := DecodeDownloadRequest([]byte(`{"src_path":"/x"}`))
+	if err != nil || old.Binary {
+		t.Errorf("old download request must default to false: %+v, %v", old, err)
+	}
+}

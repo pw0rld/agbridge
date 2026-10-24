@@ -49,6 +49,12 @@ type Router struct {
 	sessionID [8]byte      // bound to session
 	pending   map[string]chan proto.Frame
 
+	// capsMu guards capsBinaryChunks, the cached result of the
+	// daemon's capabilities.BinaryChunks advertisement (see
+	// supportsBinaryChunks in handlers_meta.go). nil = never probed.
+	capsMu           sync.Mutex
+	capsBinaryChunks *bool
+
 	// evicted is set when the gateway tells us a newer bridge with the
 	// same identity has taken over (errFrame "session_replaced"). The
 	// CLI variant has no supervisor loop, but we keep the flag and the

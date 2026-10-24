@@ -20,6 +20,11 @@ type Capabilities struct {
 	// relays the pairing without checking. Absent (0) means v0.0.4 or
 	// older.
 	ProtocolVersion uint8 `json:"protocol_version,omitempty"`
+	// BinaryChunks advertises that the daemon accepts and prefers
+	// proto.FrameTypeFileChunkBin (raw-bytes chunk encoding, no base64
+	// expansion). Additive flag: absent/false on daemons predating it,
+	// so bridges keep using the FrameTypeFileChunk JSON encoding.
+	BinaryChunks bool `json:"binary_chunks,omitempty"`
 }
 
 func (c Capabilities) Encode() ([]byte, error) { return json.Marshal(c) }

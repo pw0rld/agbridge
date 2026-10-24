@@ -10,7 +10,7 @@ import (
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/fileproto"
 	"github.com/pw0rld/agbridge/internal/fsproto"
-	
+
 	"github.com/pw0rld/agbridge/internal/proto"
 )
 
@@ -32,8 +32,11 @@ func (r *Router) ReadFileHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("bad_payload", "path is required")), nil
 	}
 	reqID := newReqID()
+	// Binary=true is always requested: an old daemon ignores the unknown
+	// field and replies with JSON chunks, which the loop below accepts
+	// too — no capabilities round-trip needed on receive paths.
 	reqJSON, _ := fileproto.FileReadRequest{
-		Path: args.Path, MaxSize: args.MaxSize, Offset: args.Offset, Limit: args.Limit,
+		Path: args.Path, MaxSize: args.MaxSize, Offset: args.Offset, Limit: args.Limit, Binary: true,
 	}.Encode()
 
 	ch := r.registerCall(reqID)
@@ -55,8 +58,8 @@ func (r *Router) ReadFileHandler(ctx context.Context, raw json.RawMessage) (any,
 				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
 			}
 			switch f.Type {
-			case proto.FrameTypeFileChunk:
-				c, err := fileproto.DecodeFileChunk(f.Payload)
+			case proto.FrameTypeFileChunk, proto.FrameTypeFileChunkBin:
+				c, err := decodeChunk(f.Type, f.Payload)
 				if err != nil {
 					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 				}
@@ -154,13 +157,17 @@ func (r *Router) WriteFileHandler(ctx context.Context, raw json.RawMessage) (any
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
 
+	// We are the chunk sender: only send binary chunks when the daemon
+	// advertises support (an old daemon would silently drop them).
+	binary := r.supportsBinaryChunks(ctx)
+
 	reqJSON, _ := fileproto.FileWriteRequest{Path: args.Path, Mode: args.Mode}.Encode()
 	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileWriteRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
 
 	if len(content) == 0 {
-		if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}); err != nil {
+		if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}, binary); err != nil {
 			return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 		}
 	} else {
@@ -170,7 +177,7 @@ func (r *Router) WriteFileHandler(ctx context.Context, raw json.RawMessage) (any
 				end = len(content)
 			}
 			chunk := fileproto.FileChunk{Data: content[off:end], Eof: end == len(content)}
-			if err := r.sendFileChunk(ctx, reqID, chunk); err != nil {
+			if err := r.sendFileChunk(ctx, reqID, chunk, binary); err != nil {
 				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 			}
 		}
@@ -212,11 +219,26 @@ func (r *Router) WriteFileHandler(ctx context.Context, raw json.RawMessage) (any
 	}
 }
 
-// sendFileChunk wraps fileproto.FileChunk into a Route FrameTypeFileChunk
-// frame and ships it via sendInner. Used by write_file and upload.
-func (r *Router) sendFileChunk(ctx context.Context, reqID string, c fileproto.FileChunk) error {
+// sendFileChunk wraps fileproto.FileChunk into a chunk frame and ships
+// it via sendInner. Used by write_file and upload. binary selects the
+// compact FrameTypeFileChunkBin encoding; callers must only pass true
+// after supportsBinaryChunks confirmed the daemon understands it.
+func (r *Router) sendFileChunk(ctx context.Context, reqID string, c fileproto.FileChunk, binary bool) error {
+	if binary {
+		return r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunkBin, ReqID: reqID, Payload: fileproto.EncodeChunkBinary(c)})
+	}
 	payload, _ := c.Encode()
 	return r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload})
+}
+
+// decodeChunk decodes a chunk frame payload according to its frame
+// type: JSON+base64 for FrameTypeFileChunk, raw bytes for
+// FrameTypeFileChunkBin. Receivers use this to accept both encodings.
+func decodeChunk(typ proto.FrameType, payload []byte) (fileproto.FileChunk, error) {
+	if typ == proto.FrameTypeFileChunkBin {
+		return fileproto.DecodeChunkBinary(payload)
+	}
+	return fileproto.DecodeFileChunk(payload)
 }
 
 type editFileArgs struct {

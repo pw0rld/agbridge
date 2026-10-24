@@ -98,6 +98,15 @@ func (r *Router) UploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 
 	ch := r.registerCall(reqID)
 	defer r.unregisterCall(reqID)
+
+	// We send the chunk frames, so gate binary on the daemon's
+	// advertisement (an old daemon silently drops unknown frame types).
+	// The probe result is cached for the connection's lifetime.
+	binary := false
+	if daemonSource == "chunks" {
+		binary = r.supportsBinaryChunks(ctx)
+	}
+
 	if err := r.sendInner(ctx, proto.Frame{Type: proto.FrameTypeUploadRequest, ReqID: reqID, Payload: reqJSON}); err != nil {
 		return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 	}
@@ -110,7 +119,7 @@ func (r *Router) UploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 				return mcpErrorResult(errcode.New("bad_payload", fmt.Sprintf("chunks_b64[%d]: %v", i, err))), nil
 			}
 			eof := i == len(args.ChunksB64)-1
-			if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+			if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}, binary); err != nil {
 				return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 			}
 		}
@@ -131,7 +140,7 @@ func (r *Router) UploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 				data := make([]byte, n)
 				copy(data, buf[:n])
 				eof := rerr == io.EOF
-				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}); err != nil {
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Data: data, Eof: eof}, binary); err != nil {
 					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 				}
 				if eof {
@@ -140,7 +149,7 @@ func (r *Router) UploadHandler(ctx context.Context, raw json.RawMessage) (any, e
 			}
 			if rerr == io.EOF {
 				// Zero-length file: send a single empty Eof chunk so daemon closes the write cleanly.
-				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}); err != nil {
+				if err := r.sendFileChunk(ctx, reqID, fileproto.FileChunk{Eof: true}, binary); err != nil {
 					return mcpErrorResult(errcode.New("network_lost", err.Error())), nil
 				}
 				break
@@ -211,8 +220,11 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 		return mcpErrorResult(errcode.New("bad_payload", "src_path required")), nil
 	}
 	reqID := newReqID()
+	// Binary=true is always requested: an old daemon ignores the unknown
+	// field and replies with JSON chunks, which the loop below accepts
+	// too — no capabilities round-trip needed on receive paths.
 	reqJSON, _ := fileproto.DownloadRequest{
-		SrcPath: args.SrcPath, Offset: args.Offset, Limit: args.Limit,
+		SrcPath: args.SrcPath, Offset: args.Offset, Limit: args.Limit, Binary: true,
 	}.Encode()
 
 	ch := r.registerCall(reqID)
@@ -258,8 +270,8 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 				return mcpErrorResult(errcode.New("network_lost", "connection reset")), nil
 			}
 			switch fr.Type {
-			case proto.FrameTypeFileChunk:
-				c, err := fileproto.DecodeFileChunk(fr.Payload)
+			case proto.FrameTypeFileChunk, proto.FrameTypeFileChunkBin:
+				c, err := decodeChunk(fr.Type, fr.Payload)
 				if err != nil {
 					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 				}

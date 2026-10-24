@@ -70,6 +70,15 @@ const (
 	FrameTypeUploadRequest   FrameType = 70
 	FrameTypeDownloadRequest FrameType = 71
 
+	// FrameTypeFileChunkBin carries a FileChunk in compact binary form
+	// (1 flags byte, bit0 = eof, followed by raw data) instead of the
+	// JSON+base64 FileChunk encoding, removing the +33% expansion on
+	// bulk transfers. Additive: senders only use it when the peer
+	// advertises capabilities.BinaryChunks (old peers never do);
+	// receivers accept both types, so mixed-version sessions stay on
+	// FrameTypeFileChunk.
+	FrameTypeFileChunkBin FrameType = 72
+
 	// Background process management (v0.3.0+). A single request frame
 	// carries action=start|status|logs|kill|list with action-specific
 	// fields; the response frame mirrors the action plus result fields.

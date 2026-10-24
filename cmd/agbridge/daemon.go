@@ -330,7 +330,7 @@ func (s *daemonState) dispatch(ctx context.Context, inner proto.Frame) {
 		go s.handleSearch(ctx, inner)
 	case proto.FrameTypeCapabilitiesRequest:
 		go s.handleCapabilities(ctx, inner)
-	case proto.FrameTypeFileChunk:
+	case proto.FrameTypeFileChunk, proto.FrameTypeFileChunkBin:
 		s.deliverFileChunk(ctx, inner)
 	case proto.FrameTypeStreamOpen:
 		req, err := streamproto.DecodeStreamOpen(inner.Payload)
@@ -527,6 +527,7 @@ func (s *daemonState) handleCapabilities(ctx context.Context, inner proto.Frame)
 		AgbridgeVersion:   agbridgeVersion,
 		DefaultWorkingDir: effectiveDefaultWorkingDir(s.cfg),
 		ProtocolVersion:   handshake.ProtocolVersion,
+		BinaryChunks:      true,
 	}
 	payload, _ := caps.Encode()
 	s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeCapabilitiesResponse, ReqID: inner.ReqID, Payload: payload})
@@ -597,12 +598,9 @@ func (s *daemonState) handleDownload(ctx context.Context, inner proto.Frame) {
 		return
 	}
 	// Reuse ReadFile but with the larger upload cap so 100 MB+ files can flow.
-	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit}
-	onChunk := func(c fileproto.FileChunk) {
-		payload, _ := c.Encode()
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
-	}
-	complete, _ := tools.ReadFile(ctx, rdReq, tools.UploadMaxBytes, onChunk)
+	rdReq := fileproto.FileReadRequest{Path: req.SrcPath, Offset: req.Offset, Limit: req.Limit, Binary: req.Binary}
+	sendChunk := chunkSender(ctx, s, inner.ReqID, req.Binary)
+	complete, _ := tools.ReadFile(ctx, rdReq, tools.UploadMaxBytes, sendChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
 }
 
@@ -661,12 +659,23 @@ func (s *daemonState) handleRead(ctx context.Context, inner proto.Frame) {
 		s.emitFileComplete(ctx, inner.ReqID, fileproto.FileComplete{Err: "bad_payload"})
 		return
 	}
-	onChunk := func(c fileproto.FileChunk) {
-		payload, _ := c.Encode()
-		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: inner.ReqID, Payload: payload})
-	}
-	complete, _ := tools.ReadFile(ctx, req, maxFileBytes, onChunk)
+	sendChunk := chunkSender(ctx, s, inner.ReqID, req.Binary)
+	complete, _ := tools.ReadFile(ctx, req, maxFileBytes, sendChunk)
 	s.emitFileComplete(ctx, inner.ReqID, complete)
+}
+
+// chunkSender returns the onChunk callback for read/download responses:
+// binary chunk frames when the request asked for them (the bridge only
+// does when it supports FrameTypeFileChunkBin), JSON encoding otherwise.
+func chunkSender(ctx context.Context, s *daemonState, reqID string, binary bool) func(fileproto.FileChunk) {
+	return func(c fileproto.FileChunk) {
+		if binary {
+			s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunkBin, ReqID: reqID, Payload: fileproto.EncodeChunkBinary(c)})
+			return
+		}
+		payload, _ := c.Encode()
+		s.sendInner(ctx, proto.Frame{Type: proto.FrameTypeFileChunk, ReqID: reqID, Payload: payload})
+	}
 }
 
 func (s *daemonState) beginWrite(reqID string) *writeSlot {
@@ -712,7 +721,13 @@ func (s *daemonState) deliverFileChunk(ctx context.Context, inner proto.Frame) {
 	if !ok {
 		return
 	}
-	c, err := fileproto.DecodeFileChunk(inner.Payload)
+	var c fileproto.FileChunk
+	var err error
+	if inner.Type == proto.FrameTypeFileChunkBin {
+		c, err = fileproto.DecodeChunkBinary(inner.Payload)
+	} else {
+		c, err = fileproto.DecodeFileChunk(inner.Payload)
+	}
 	if err != nil {
 		return
 	}

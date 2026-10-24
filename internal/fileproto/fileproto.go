@@ -1,10 +1,13 @@
 // Package fileproto defines the JSON payload schemas for FileReadRequest,
 // FileWriteRequest, FileChunk, FileComplete frames. Binary chunk data is
-// base64-encoded on the wire (encoding/json's []byte handling).
+// base64-encoded on the wire in the JSON encoding (encoding/json's []byte
+// handling); EncodeChunkBinary provides the compact alternative used with
+// proto.FrameTypeFileChunkBin when both peers support it.
 package fileproto
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 )
 
@@ -26,6 +29,10 @@ type FileReadRequest struct {
 	MaxSize int    `json:"max_size,omitempty"`
 	Offset  int64  `json:"offset,omitempty"` // byte offset from start of file (0 = head)
 	Limit   int64  `json:"limit,omitempty"`  // max bytes to read (0 = read to EOF or MaxSize cap)
+	// Binary asks the daemon to answer with FrameTypeFileChunkBin
+	// instead of FrameTypeFileChunk. Old daemons ignore the unknown
+	// field and reply with JSON chunks, which bridges accept too.
+	Binary bool `json:"binary,omitempty"`
 }
 
 // FileWriteRequest is the bridge → daemon write kickoff. Subsequent FileChunk
@@ -78,6 +85,10 @@ type DownloadRequest struct {
 	SrcPath string `json:"src_path"`
 	Offset  int64  `json:"offset,omitempty"`
 	Limit   int64  `json:"limit,omitempty"`
+	// Binary asks the daemon to answer with FrameTypeFileChunkBin
+	// instead of FrameTypeFileChunk. Old daemons ignore the unknown
+	// field and reply with JSON chunks, which bridges accept too.
+	Binary bool `json:"binary,omitempty"`
 }
 
 // FileChunk carries one slice of file content. Used for both read (daemon →
@@ -149,4 +160,27 @@ func DecodeFileComplete(b []byte) (FileComplete, error) {
 	var c FileComplete
 	err := json.Unmarshal(b, &c)
 	return c, err
+}
+
+// EncodeChunkBinary serializes a FileChunk in the compact binary form
+// used with proto.FrameTypeFileChunkBin: one flags byte (bit0 = eof)
+// followed by the raw data bytes. Avoids the +33% base64 expansion of
+// the JSON FileChunk encoding on bulk transfers.
+func EncodeChunkBinary(c FileChunk) []byte {
+	b := make([]byte, 1+len(c.Data))
+	if c.Eof {
+		b[0] = 1
+	}
+	copy(b[1:], c.Data)
+	return b
+}
+
+// DecodeChunkBinary parses the EncodeChunkBinary form. The returned
+// Data aliases the input slice; copy it before retaining beyond the
+// frame buffer's lifetime.
+func DecodeChunkBinary(b []byte) (FileChunk, error) {
+	if len(b) < 1 {
+		return FileChunk{}, errors.New("fileproto: binary chunk payload too short")
+	}
+	return FileChunk{Data: b[1:], Eof: b[0]&1 != 0}, nil
 }

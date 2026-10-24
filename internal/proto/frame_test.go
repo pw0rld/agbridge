@@ -136,6 +136,7 @@ func TestFrameTypePhase4Values(t *testing.T) {
 		{FrameTypeFileWriteRequest, 31},
 		{FrameTypeFileChunk, 32},
 		{FrameTypeFileComplete, 33},
+		{FrameTypeFileChunkBin, 72},
 		{FrameTypeStreamOpen, 40},
 		{FrameTypeStreamAck, 41},
 		{FrameTypeStreamData, 42},
