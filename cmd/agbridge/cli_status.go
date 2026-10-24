@@ -38,10 +38,8 @@ func runStatus(cmd *cobra.Command, opts cliclient.Options) error {
 	defer cancel()
 
 	start := time.Now()
-	_, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		// status is connect-only; no handler call.
-		return nil, nil
-	})
+	// status is connect-only; no handler call.
+	err := ensureConnected(ctx, opts)
 	elapsed := time.Since(start)
 
 	if err != nil {

@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"path"
 
-	"github.com/pw0rld/agbridge/internal/capabilities"
 	"github.com/pw0rld/agbridge/internal/cliclient"
 	"github.com/pw0rld/agbridge/internal/state"
 )
@@ -97,9 +95,7 @@ func setWorkingDir(target, dir string) error {
 // fetchDefaultWorkingDir does one capabilities round-trip and returns the
 // daemon's advertised default_working_dir.
 func fetchDefaultWorkingDir(ctx context.Context, opts cliclient.Options) (string, error) {
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		return c.Router().CapabilitiesHandler(ctx, json.RawMessage("{}"))
-	})
+	res, err := invokeRouted(ctx, opts, "capabilities", nil)
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +104,7 @@ func fetchDefaultWorkingDir(ctx context.Context, opts cliclient.Options) (string
 		return "", errors.New("capabilities: unexpected shape")
 	}
 	meta, _ := rmap["_meta"].(map[string]any)
-	caps, ok := meta["capabilities"].(capabilities.Capabilities)
+	caps, ok := coerceCapabilities(meta["capabilities"])
 	if !ok {
 		return "", errors.New("capabilities: missing snapshot")
 	}

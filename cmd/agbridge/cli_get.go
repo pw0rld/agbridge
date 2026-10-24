@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -46,12 +45,9 @@ func runGet(cmd *cobra.Command, remotePath, localPath string, opts cliclient.Opt
 	}
 	remotePath = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{
-			"src_path":  remotePath,
-			"dest_path": localPath,
-		})
-		return c.Router().DownloadHandler(ctx, argsJSON)
+	res, err := invokeRouted(ctx, opts, "download", map[string]any{
+		"src_path":  remotePath,
+		"dest_path": localPath,
 	})
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)

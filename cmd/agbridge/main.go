@@ -66,6 +66,7 @@ func newRootCmd() *cobra.Command {
 		newConfigCmd(), newLogoutCmd(), newDoctorCmd(),
 		newGatewayListDevicesCmd(), newGatewayRevokeCmd(),
 		// CLI subcommands (v0.0.2)
+		newAgentCmd(),
 		newTargetsCmd(),
 		newAIHelpCmd(),
 		newStatusCmd(),

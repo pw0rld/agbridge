@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -74,18 +73,15 @@ func runPut(cmd *cobra.Command, localPath, remotePath string, mode uint32, opts 
 	}
 	remotePath = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{
-			"source":     "local_path",
-			"dest_path":  remotePath,
-			"local_path": localPath,
-		}
-		if mode != 0 {
-			argsMap["mode"] = mode
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().UploadHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{
+		"source":     "local_path",
+		"dest_path":  remotePath,
+		"local_path": localPath,
+	}
+	if mode != 0 {
+		argsMap["mode"] = mode
+	}
+	res, err := invokeRouted(ctx, opts, "upload", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

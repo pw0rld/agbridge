@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -93,22 +92,19 @@ func runWrite(cmd *cobra.Command, path string, data []byte, mode uint32, opts cl
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsMap := map[string]any{"path": path}
-		if mode != 0 {
-			argsMap["mode"] = mode
-		}
-		// Prefer the raw `content` field for valid UTF-8 (cheaper on
-		// the wire and matches the F9 write_file ergonomics). Fall
-		// back to base64 for arbitrary bytes.
-		if utf8.Valid(data) {
-			argsMap["content"] = string(data)
-		} else {
-			argsMap["content_b64"] = base64.StdEncoding.EncodeToString(data)
-		}
-		argsJSON, _ := json.Marshal(argsMap)
-		return c.Router().WriteFileHandler(ctx, argsJSON)
-	})
+	argsMap := map[string]any{"path": path}
+	if mode != 0 {
+		argsMap["mode"] = mode
+	}
+	// Prefer the raw `content` field for valid UTF-8 (cheaper on
+	// the wire and matches the F9 write_file ergonomics). Fall
+	// back to base64 for arbitrary bytes.
+	if utf8.Valid(data) {
+		argsMap["content"] = string(data)
+	} else {
+		argsMap["content_b64"] = base64.StdEncoding.EncodeToString(data)
+	}
+	res, err := invokeRouted(ctx, opts, "write_file", argsMap)
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

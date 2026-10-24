@@ -74,5 +74,6 @@ func loadOpts() (cliclient.Options, error) {
 		BridgeStaticKeyPath: st.BridgeStaticKeyPath,
 		DaemonPubkey:        rec.Pubkey,
 		Target:              target,
+		AgentSocket:         agentSocketPath(),
 	}, nil
 }

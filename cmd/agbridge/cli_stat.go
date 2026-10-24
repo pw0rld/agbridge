@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -43,10 +42,7 @@ func runStat(cmd *cobra.Command, path string, opts cliclient.Options) error {
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{"path": path})
-		return c.Router().StatHandler(ctx, argsJSON)
-	})
+	res, err := invokeRouted(ctx, opts, "stat", map[string]any{"path": path})
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
 		return err

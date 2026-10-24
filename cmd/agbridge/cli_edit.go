@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -55,14 +54,11 @@ func runEdit(cmd *cobra.Command, path, oldStr, newStr string, replaceAll bool, o
 	}
 	path = resolved
 
-	res, err := cliclient.Invoke(ctx, opts, func(ctx context.Context, c *cliclient.Client) (any, error) {
-		argsJSON, _ := json.Marshal(map[string]any{
-			"path":        path,
-			"old_string":  oldStr,
-			"new_string":  newStr,
-			"replace_all": replaceAll,
-		})
-		return c.Router().EditFileHandler(ctx, argsJSON)
+	res, err := invokeRouted(ctx, opts, "edit_file", map[string]any{
+		"path":        path,
+		"old_string":  oldStr,
+		"new_string":  newStr,
+		"replace_all": replaceAll,
 	})
 	if err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "network_lost", err.Error(), true)
