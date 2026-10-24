@@ -218,14 +218,15 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 	}
 
 	// Subscribe to daemon→bridge frames for the duration of this session.
-	// On return, clear the writer so the daemon read loop in handleDaemon
-	// drops further frames instead of writing to a dead bconn.
+	// Unsubscribe removes exactly this subscription — an old bridge's
+	// teardown can never clear a newer bridge's writer (the classic
+	// replace-race hang the single writer slot used to cause).
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	proxy.SetWriter(func(_ context.Context, f proto.Frame) error {
+	sub := proxy.Subscribe(h.Name, func(_ context.Context, f proto.Frame) error {
 		return c.Send(bridgeCtx, f)
 	})
-	defer proxy.SetWriter(nil)
+	defer proxy.Unsubscribe(sub)
 
 	// bridge → daemon main loop.
 	for {
