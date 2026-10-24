@@ -7,13 +7,33 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"unicode/utf8"
 
 	"github.com/pw0rld/agbridge/internal/errcode"
 	"github.com/pw0rld/agbridge/internal/fileproto"
-	
 	"github.com/pw0rld/agbridge/internal/proto"
 )
+
+// finalizeTempDownload chmods and closes the streamed temp file, then
+// renames it onto dest. Temp and dest share a directory, so rename is
+// atomic on POSIX: readers see either the old file or the complete new
+// one, never a truncated partial. On any error the file is closed and the
+// caller must remove the temp path.
+func finalizeTempDownload(tmp *os.File, dest string) error {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(dest); err == nil {
+		mode = fi.Mode().Perm() // replacing an existing file: keep its perms
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dest)
+}
 
 type uploadArgs struct {
 	DestPath       string   `json:"dest_path"`
@@ -206,17 +226,27 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 
 	// If dest_path supplied, stream to local file (no buffering all in
 	// memory). Otherwise buffer and return inline.
+	//
+	// Never open DestPath directly: a failed or cancelled download must
+	// not truncate or corrupt a pre-existing file. Stream to a temp file
+	// in the same directory (rename needs the same filesystem) and rename
+	// into place only after FileComplete arrives without an error.
 	var (
-		f       *os.File
+		tmp     *os.File // nil after successful rename; nil-check in cleanup tells the two apart
 		content []byte
 	)
 	if args.DestPath != "" {
-		var err error
-		f, err = os.Create(args.DestPath)
+		t, err := os.CreateTemp(filepath.Dir(args.DestPath), "."+filepath.Base(args.DestPath)+".agbridge-*.tmp")
 		if err != nil {
 			return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
 		}
-		defer f.Close()
+		tmp = t
+		defer func() {
+			if tmp != nil { // download never finalized → discard temp
+				_ = tmp.Close()
+				_ = os.Remove(t.Name())
+			}
+		}()
 	}
 
 	for {
@@ -233,8 +263,8 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 				if err != nil {
 					return mcpErrorResult(errcode.New("bad_payload", err.Error())), nil
 				}
-				if f != nil {
-					if _, err := f.Write(c.Data); err != nil {
+				if tmp != nil {
+					if _, err := tmp.Write(c.Data); err != nil {
 						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
 					}
 				} else {
@@ -260,6 +290,15 @@ func (r *Router) DownloadHandler(ctx context.Context, raw json.RawMessage) (any,
 						msg = msg + " (" + c.ErrDetail + ")"
 					}
 					return mcpErrorResult(errcode.New(c.Err, msg)), nil
+				}
+				if tmp != nil {
+					if err := finalizeTempDownload(tmp, args.DestPath); err != nil {
+						name := tmp.Name()
+						tmp = nil // already closed by finalizeTempDownload
+						_ = os.Remove(name)
+						return mcpErrorResult(errcode.New("write_failed", err.Error())), nil
+					}
+					tmp = nil // renamed into place; defer must not remove it
 				}
 				meta := map[string]any{
 					"size":     c.Size,
