@@ -1,6 +1,6 @@
 //go:build !unix
 
-package gateway
+package filelock
 
 import "os"
 
@@ -8,5 +8,5 @@ import "os"
 // gateway is only supported on unix (Windows ships the CLI client
 // only), so this build exists to keep the package compiling; the
 // in-process mutex still serializes single-process access.
-func tryLockTokenFile(*os.File) (bool, error) { return true, nil }
-func unlockTokenFile(*os.File)                {}
+func tryLock(*os.File) (bool, error) { return true, nil }
+func unlock(*os.File)                {}

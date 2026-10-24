@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 
 	"github.com/pw0rld/agbridge/internal/auth"
 	"github.com/pw0rld/agbridge/internal/config"
+	"github.com/pw0rld/agbridge/internal/filelock"
 	"github.com/pw0rld/agbridge/internal/state"
 )
 
@@ -57,17 +59,70 @@ type EnrollTarget struct {
 // gateway's shared TLS listener.
 type EnrollServer struct {
 	Tokens        *TokenStore
-	State         *state.GatewayState
 	StatePath     string // persists gateway state after each successful enroll; "" disables
 	GatewayURL    string // returned to device, e.g. wss://gw.example.com/
 	CertPinSource func() string
 
-	// Live, if non-nil, receives newly-enrolled agents/daemons so they
-	// take effect without requiring SIGHUP.
-	Live *CredRegistry
-
 	mu sync.Mutex
+	// base is the config-derived state (gateway.yaml). Never mutated.
+	// Each enrollment rebuilds the working state from base ⊕ the file on
+	// disk, so base must never absorb enrolled-only entries: a sibling
+	// CLI's gateway-revoke prune would otherwise be flushed back out by
+	// the next enrollment (revocation resurrection).
+	base *state.GatewayState
+	// state is the snapshot adopted after the last successful
+	// reload→mutate→save. Authoritative only when StatePath == ""
+	// (nothing to reload from).
+	state *state.GatewayState
+	// live receives newly-enrolled agents/daemons so they take effect
+	// without a SIGHUP. Guarded by mu: it is wired after the listener
+	// starts serving, and refreshed on reload.
+	live *CredRegistry
 }
+
+// SetBase installs the config-derived state baseline. Safe to call while
+// serving (from the SIGHUP reload path after a config change).
+func (s *EnrollServer) SetBase(base *state.GatewayState) {
+	s.mu.Lock()
+	s.base = base
+	s.mu.Unlock()
+}
+
+// SetLive wires the running CredRegistry so enrollments authenticate
+// immediately. Safe to call after the listener has started serving.
+func (s *EnrollServer) SetLive(c *CredRegistry) {
+	s.mu.Lock()
+	s.live = c
+	s.mu.Unlock()
+}
+
+// CurrentLive returns the wired CredRegistry, if any.
+func (s *EnrollServer) CurrentLive() *CredRegistry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.live
+}
+
+// CurrentState returns the snapshot adopted after the last enrollment.
+func (s *EnrollServer) CurrentState() *state.GatewayState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != nil {
+		return s.state
+	}
+	if s.base != nil {
+		return s.base
+	}
+	return &state.GatewayState{Version: state.CurrentVersion}
+}
+
+// enrollUserError carries an HTTP status out of a mutateState callback.
+type enrollUserError struct {
+	status int
+	msg    string
+}
+
+func (e *enrollUserError) Error() string { return e.msg }
 
 // HandleEnroll is the http.HandlerFunc registered at POST /v1/enroll.
 func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -117,97 +172,97 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		E2EMode:    defaultE2E,
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch tok.Role {
-	case "daemon":
-		entry := state.DaemonEntry{
-			Name:      tok.Name,
-			DeviceID:  devID,
-			TokenHash: apiHash,
-			NoisePub:  req.DevicePubkeyB64,
-		}
-		replaced := false
-		for i, d := range s.State.Daemons {
-			if d.Name == tok.Name {
-				s.State.Daemons[i] = entry
-				replaced = true
-				break
+	if err := s.mutateState(func(st *state.GatewayState) error {
+		switch tok.Role {
+		case "daemon":
+			entry := state.DaemonEntry{
+				Name:      tok.Name,
+				DeviceID:  devID,
+				TokenHash: apiHash,
+				NoisePub:  req.DevicePubkeyB64,
 			}
-		}
-		if !replaced {
-			s.State.Daemons = append(s.State.Daemons, entry)
-		}
-		if tok.Policy != nil {
-			resp.ExecEnabled = tok.Policy.ExecEnabled
-			resp.EnvAllowlist = append([]string(nil), tok.Policy.EnvAllowlist...)
-			if len(resp.EnvAllowlist) == 0 {
-				resp.EnvAllowlist = []string{"PATH", "HOME", "LANG"}
-			}
-			resp.ForbiddenPorts = append([]int(nil), tok.Policy.ForbiddenPorts...)
-			resp.AllowedBridgePubkeys = append([]string(nil), tok.Policy.AllowedBridgePubkeys...)
-			resp.DefaultWorkingDir = tok.Policy.DefaultWorkingDir
-		}
-
-	case "bridge":
-		// Resolve every authorized target's Noise pubkey. Any target that
-		// isn't enrolled yet is a 409 — the bridge can't pin a key it
-		// can't learn.
-		for _, name := range tok.Targets {
-			var daemonPub string
-			for _, d := range s.State.Daemons {
-				if d.Name == name {
-					daemonPub = d.NoisePub
+			replaced := false
+			for i, d := range st.Daemons {
+				if d.Name == tok.Name {
+					st.Daemons[i] = entry
+					replaced = true
 					break
 				}
 			}
-			if daemonPub == "" {
-				http.Error(w, fmt.Sprintf("target daemon %q not yet enrolled", name), http.StatusConflict)
-				return
+			if !replaced {
+				st.Daemons = append(st.Daemons, entry)
 			}
-			resp.Targets = append(resp.Targets, EnrollTarget{Name: name, DaemonPubkey: daemonPub})
-		}
-		entry := state.AgentEntry{
-			Name:           tok.Name,
-			DeviceID:       devID,
-			APIKeyHash:     apiHash,
-			AllowedDaemons: append([]string(nil), tok.Targets...),
-		}
-		replaced := false
-		for i, a := range s.State.Agents {
-			if a.Name == tok.Name {
-				s.State.Agents[i] = entry
-				replaced = true
-				break
+			if tok.Policy != nil {
+				resp.ExecEnabled = tok.Policy.ExecEnabled
+				resp.EnvAllowlist = append([]string(nil), tok.Policy.EnvAllowlist...)
+				if len(resp.EnvAllowlist) == 0 {
+					resp.EnvAllowlist = []string{"PATH", "HOME", "LANG"}
+				}
+				resp.ForbiddenPorts = append([]int(nil), tok.Policy.ForbiddenPorts...)
+				resp.AllowedBridgePubkeys = append([]string(nil), tok.Policy.AllowedBridgePubkeys...)
+				resp.DefaultWorkingDir = tok.Policy.DefaultWorkingDir
 			}
-		}
-		if !replaced {
-			s.State.Agents = append(s.State.Agents, entry)
-		}
-		resp.TargetDaemon = resp.Targets[0].Name
-		resp.DaemonPubkey = resp.Targets[0].DaemonPubkey
 
-	default:
-		http.Error(w, "unknown role", http.StatusInternalServerError)
-		return
-	}
+		case "bridge":
+			// Resolve every authorized target's Noise pubkey. Any target that
+			// isn't enrolled yet is a 409 — the bridge can't pin a key it
+			// can't learn.
+			for _, name := range tok.Targets {
+				var daemonPub string
+				for _, d := range st.Daemons {
+					if d.Name == name {
+						daemonPub = d.NoisePub
+						break
+					}
+				}
+				if daemonPub == "" {
+					return &enrollUserError{http.StatusConflict,
+						fmt.Sprintf("target daemon %q not yet enrolled", name)}
+				}
+				resp.Targets = append(resp.Targets, EnrollTarget{Name: name, DaemonPubkey: daemonPub})
+			}
+			entry := state.AgentEntry{
+				Name:           tok.Name,
+				DeviceID:       devID,
+				APIKeyHash:     apiHash,
+				AllowedDaemons: append([]string(nil), tok.Targets...),
+			}
+			replaced := false
+			for i, a := range st.Agents {
+				if a.Name == tok.Name {
+					st.Agents[i] = entry
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				st.Agents = append(st.Agents, entry)
+			}
+			resp.TargetDaemon = resp.Targets[0].Name
+			resp.DaemonPubkey = resp.Targets[0].DaemonPubkey
 
-	if s.StatePath != "" {
-		if err := state.SaveGateway(s.StatePath, s.State); err != nil {
+		default:
+			return &enrollUserError{http.StatusInternalServerError, "unknown role"}
+		}
+		return nil
+	}); err != nil {
+		var ue *enrollUserError
+		if errors.As(err, &ue) {
+			http.Error(w, ue.msg, ue.status)
+		} else {
 			http.Error(w, "save state: "+err.Error(), http.StatusInternalServerError)
-			return
 		}
+		return
 	}
 
 	// Push the new credential into the live CredRegistry so subsequent
 	// WSS Hello frames find it without a SIGHUP cycle.
-	if s.Live != nil {
+	if live := s.CurrentLive(); live != nil {
 		switch tok.Role {
 		case "daemon":
-			s.Live.AddDaemon(config.DaemonEntry{Name: tok.Name, TokenHash: apiHash})
+			live.AddDaemon(config.DaemonEntry{Name: tok.Name, TokenHash: apiHash})
 		case "bridge":
-			s.Live.AddAgent(config.AgentEntry{
+			live.AddAgent(config.AgentEntry{
 				Name:           tok.Name,
 				APIKeyHash:     apiHash,
 				AllowedDaemons: append([]string(nil), tok.Targets...),
@@ -217,6 +272,97 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// mutateState rebuilds the working state under the in-process mutex and
+// a cross-process file lock, applies fn, then persists before adopting.
+// The in-memory snapshot is never flushed verbatim — the working state
+// is always config base ⊕ what is currently on disk — so entries a
+// sibling process pruned (gateway-revoke) stay pruned, and entries a
+// sibling added are not clobbered. Holding the file lock across the
+// save closes the window where a revoke could land between our reload
+// and write.
+func (s *EnrollServer) mutateState(fn func(st *state.GatewayState) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.StatePath != "" {
+		lock, err := filelock.Acquire(s.StatePath, filelock.DefaultTimeout)
+		if err != nil {
+			return err
+		}
+		defer lock.Release()
+	}
+
+	st := s.effectiveStateLocked()
+	if err := fn(st); err != nil {
+		return err
+	}
+	if s.StatePath != "" {
+		if err := state.SaveGateway(s.StatePath, st); err != nil {
+			return err
+		}
+	}
+	s.state = st
+	return nil
+}
+
+// effectiveStateLocked returns a fresh copy of the config baseline with
+// entries that exist only in the persisted file layered in. The
+// baseline never learns about enrollments, so anything pruned from
+// disk stays gone. With StatePath == "" the in-memory state is the
+// sole source of truth (no file to reload from).
+func (s *EnrollServer) effectiveStateLocked() *state.GatewayState {
+	base := s.base
+	if base == nil {
+		if s.StatePath == "" {
+			base = s.state
+		}
+		if base == nil {
+			base = &state.GatewayState{Version: state.CurrentVersion}
+		}
+	}
+	out := copyGatewayState(base)
+	if s.StatePath != "" {
+		if prior, err := state.LoadGateway(s.StatePath); err == nil {
+			mergeEnrolled(out, prior)
+		}
+	}
+	return out
+}
+
+func copyGatewayState(in *state.GatewayState) *state.GatewayState {
+	out := *in
+	if in.Agents != nil {
+		out.Agents = append([]state.AgentEntry(nil), in.Agents...)
+	}
+	if in.Daemons != nil {
+		out.Daemons = append([]state.DaemonEntry(nil), in.Daemons...)
+	}
+	return &out
+}
+
+// mergeEnrolled layers prior entries that into lacks. Existing names
+// win: config and the enrollment being applied take precedence over
+// stale persisted records.
+func mergeEnrolled(into, prior *state.GatewayState) {
+	have := map[string]bool{}
+	for _, a := range into.Agents {
+		have["a/"+a.Name] = true
+	}
+	for _, d := range into.Daemons {
+		have["d/"+d.Name] = true
+	}
+	for _, a := range prior.Agents {
+		if !have["a/"+a.Name] {
+			into.Agents = append(into.Agents, a)
+		}
+	}
+	for _, d := range prior.Daemons {
+		if !have["d/"+d.Name] {
+			into.Daemons = append(into.Daemons, d)
+		}
+	}
 }
 
 func randomBase64(nBytes int) (string, error) {

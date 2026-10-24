@@ -1,6 +1,6 @@
 //go:build unix
 
-package gateway
+package filelock
 
 import (
 	"errors"
@@ -8,9 +8,9 @@ import (
 	"syscall"
 )
 
-// tryLockTokenFile attempts a non-blocking exclusive flock. Reports
+// tryLock attempts a non-blocking exclusive flock. Reports
 // (false, nil) when another process holds the lock.
-func tryLockTokenFile(f *os.File) (bool, error) {
+func tryLock(f *os.File) (bool, error) {
 	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 		return false, nil
@@ -21,6 +21,6 @@ func tryLockTokenFile(f *os.File) (bool, error) {
 	return true, nil
 }
 
-func unlockTokenFile(f *os.File) {
+func unlock(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

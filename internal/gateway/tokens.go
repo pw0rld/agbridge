@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/pw0rld/agbridge/internal/filelock"
 )
 
 // Token is a one-shot enrollment credential. After Consume() it is
@@ -73,52 +75,18 @@ func NewTokenStore(path string) (*TokenStore, error) {
 	return s, nil
 }
 
-// fileLock is a held cross-process lock on <path>.lock. The data file
-// itself cannot carry the lock because flushLocked replaces it via
-// rename (lock owners would end up flock'd on an orphaned inode).
-type fileLock struct {
-	f *os.File
-}
-
 // crossLock serialises the reload→mutate→flush sequences against
 // sibling processes (CLI issue-token vs the running gateway). Without
 // it, a store that reloaded before a sibling's flush writes back a
 // stale map and resurrects tokens the sibling already consumed —
-// double-spend of a one-shot credential. Bounded wait so a wedged
-// holder cannot block enrollment forever.
-func (s *TokenStore) crossLock() (*fileLock, error) {
-	dir := filepath.Dir(s.path)
-	if dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0o700)
-	}
-	f, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+// double-spend of a one-shot credential. The lock lives on a sidecar
+// file because flushLocked replaces the data file via rename.
+func (s *TokenStore) crossLock() (*filelock.Locker, error) {
+	lock, err := filelock.Acquire(s.path, filelock.DefaultTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("tokens: open lockfile: %w", err)
+		return nil, fmt.Errorf("tokens: %w", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		ok, err := tryLockTokenFile(f)
-		if err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("tokens: lock: %w", err)
-		}
-		if ok {
-			return &fileLock{f: f}, nil
-		}
-		if time.Now().After(deadline) {
-			_ = f.Close()
-			return nil, errors.New("tokens: timed out waiting for token lock")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func (l *fileLock) Release() {
-	if l == nil {
-		return
-	}
-	unlockTokenFile(l.f)
-	_ = l.f.Close()
+	return lock, nil
 }
 
 // Issue creates and persists a new token.
