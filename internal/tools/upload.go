@@ -129,8 +129,8 @@ func openUploadTemp(destPath string, mode uint32) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if mode != 0 {
-		_ = os.Chmod(tmp.Name(), os.FileMode(mode))
+	if m := fileproto.SanitizeFileMode(mode); m != 0 {
+		_ = os.Chmod(tmp.Name(), m)
 	}
 	return tmp, tmp.Name(), nil
 }
@@ -160,8 +160,8 @@ func finalizeUpload(tmp *os.File, tmpPath, destPath string, mode uint32, total i
 			ErrDetail: fmt.Sprintf("expected %d got %d", expSize, total),
 		}, nil
 	}
-	if mode != 0 {
-		_ = os.Chmod(tmpPath, os.FileMode(mode))
+	if m := fileproto.SanitizeFileMode(mode); m != 0 {
+		_ = os.Chmod(tmpPath, m)
 	}
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)

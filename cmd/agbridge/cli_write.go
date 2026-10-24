@@ -28,7 +28,7 @@ import (
 func newWriteCmd() *cobra.Command {
 	var content string
 	var fromFile string
-	var mode uint32
+	var modeStr string
 	var explicit bool
 	cmd := &cobra.Command{
 		Use:   "write <path>",
@@ -45,6 +45,11 @@ func newWriteCmd() *cobra.Command {
 				printErrorJSON(cmd.ErrOrStderr(), "state_unreadable", err.Error(), false)
 				return err
 			}
+			mode, err := parseMode(modeStr)
+			if err != nil {
+				printErrorJSON(cmd.ErrOrStderr(), "bad_payload", err.Error(), false)
+				return err
+			}
 			data, err := resolveWriteContent(cmd, content, explicit, fromFile)
 			if err != nil {
 				printErrorJSON(cmd.ErrOrStderr(), "bad_payload", err.Error(), false)
@@ -55,7 +60,7 @@ func newWriteCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&content, "content", "", "inline content (use empty string to touch a zero-byte file)")
 	cmd.Flags().StringVar(&fromFile, "from-file", "", "read content from a local file path")
-	cmd.Flags().Uint32Var(&mode, "mode", 0, "file mode (octal, e.g. 0644); 0 = daemon default")
+	cmd.Flags().StringVar(&modeStr, "mode", "", "file mode (octal, e.g. 0644); 0 = daemon default")
 	return cmd
 }
 

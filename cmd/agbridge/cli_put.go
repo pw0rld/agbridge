@@ -45,6 +45,9 @@ func newPutCmd() *cobra.Command {
 // parseMode accepts "0644", "644", "0", or "" and returns the parsed
 // octal mode. Empty or "0" means "use daemon default" — the field is
 // omitted from the JSON args so handler-side zero-handling kicks in.
+// Modes above 0777 are rejected: setuid/setgid/sticky bits are never
+// honored by the daemon, so accepting them here would only create
+// silently-ignored flags (better to fail loudly on explicit intent).
 func parseMode(s string) (uint32, error) {
 	if s == "" || s == "0" {
 		return 0, nil
@@ -52,6 +55,9 @@ func parseMode(s string) (uint32, error) {
 	v, err := strconv.ParseUint(s, 8, 32)
 	if err != nil {
 		return 0, fmt.Errorf("--mode %q: %w", s, err)
+	}
+	if v > 0o777 {
+		return 0, fmt.Errorf("--mode %q: permission bits only (0-777); setuid/setgid/sticky are not supported", s)
 	}
 	return uint32(v), nil
 }

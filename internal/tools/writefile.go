@@ -24,7 +24,7 @@ type ChunkSource func() (fileproto.FileChunk, error)
 // file is never partially overwritten — failures leave the original (if any)
 // in place.
 func WriteFile(ctx context.Context, req fileproto.FileWriteRequest, maxBytes int64, nextChunk ChunkSource) (fileproto.FileComplete, error) {
-	mode := os.FileMode(req.Mode)
+	mode := fileproto.SanitizeFileMode(req.Mode)
 	if mode == 0 {
 		mode = 0o644
 	}

@@ -3,7 +3,19 @@
 // base64-encoded on the wire (encoding/json's []byte handling).
 package fileproto
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"os"
+)
+
+// SanitizeFileMode clamps a wire-provided mode to permission bits (0777).
+// The daemon treats Mode fields on the wire as untrusted input: setuid,
+// setgid, and sticky bits are always dropped so a remote request can
+// never make the daemon create privileged binaries. Zero stays zero,
+// which callers interpret as "use the daemon default".
+func SanitizeFileMode(m uint32) os.FileMode {
+	return os.FileMode(m) & 0o777
+}
 
 // FileReadRequest is the bridge → daemon read kickoff. Offset and Limit
 // enable AI-friendly partial reads of large files (e.g., view lines
