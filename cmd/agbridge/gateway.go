@@ -71,6 +71,11 @@ func newGatewayCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("token store: %w", err)
 			}
+			// Prune used/expired enrollment tokens; without this the
+			// store only ever grows.
+			go tokenStore.GCLoop(ctx, 0, 0, func(err error) {
+				fmt.Fprintf(os.Stderr, "gateway: token GC: %v\n", err)
+			})
 			// enrollBase must stay config-derived: EnrollServer rebuilds
 			// state as base ⊕ the on-disk file on every write, so letting
 			// persisted-only entries leak into base would flush back

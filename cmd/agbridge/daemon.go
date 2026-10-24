@@ -234,6 +234,10 @@ func runDaemonSession(parent context.Context, conn *wss.Conn, cfg *config.Daemon
 		streams: make(map[string]*streamSlot),
 		bgReg:   tools.NewBgRegistry(),
 	}
+	// Reaper for finished background processes: without it, every
+	// bg.exec that ever ran keeps up to 2 MiB of output buffers pinned
+	// for the daemon's whole lifetime.
+	go state.bgReg.GCLoop(sessionCtx, 0)
 	for {
 		f, err := conn.Recv(sessionCtx)
 		if err != nil {

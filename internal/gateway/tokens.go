@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
@@ -12,6 +13,14 @@ import (
 	"time"
 
 	"github.com/pw0rld/agbridge/internal/filelock"
+)
+
+// Token GC defaults: sweep hourly, drop used tokens and long-expired
+// unused ones after a week of tombstone (audit trail stays in the
+// gateway log; the store is not the record of enrollment history).
+const (
+	TokenGCInterval  = 1 * time.Hour
+	TokenGCRetention = 7 * 24 * time.Hour
 )
 
 // Token is a one-shot enrollment credential. After Consume() it is
@@ -219,6 +228,33 @@ func (s *TokenStore) GC(retention time.Duration) error {
 		}
 	}
 	return s.flushLocked()
+}
+
+// GCLoop calls GC every interval until ctx cancels. interval/retention
+// of 0 select TokenGCInterval/TokenGCRetention. Runs on the calling
+// goroutine; start it with go store.GCLoop(ctx, ...). onErr, if
+// non-nil, receives sweep failures (the loop keeps running).
+func (s *TokenStore) GCLoop(ctx context.Context, interval, retention time.Duration, onErr func(error)) {
+	if interval <= 0 {
+		interval = TokenGCInterval
+	}
+	if retention <= 0 {
+		retention = TokenGCRetention
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := s.GC(retention); err != nil {
+				if onErr != nil {
+					onErr(err)
+				}
+			}
+		}
+	}
 }
 
 // List returns a copy of all known tokens (used for gateway list-devices).

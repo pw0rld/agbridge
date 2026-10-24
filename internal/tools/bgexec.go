@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -122,8 +123,9 @@ type BgRegistry struct {
 	idleGC    time.Duration
 }
 
-// NewBgRegistry creates an empty registry. Caller can optionally start
-// a GC goroutine via go reg.GCLoop(ctx).
+// NewBgRegistry creates an empty registry. Callers should start the
+// reaper with go reg.GCLoop(ctx) so finished processes stop pinning
+// their (up to 2 MiB) output buffers forever.
 func NewBgRegistry() *BgRegistry {
 	return &BgRegistry{
 		processes: make(map[string]*BgProcess),
@@ -387,8 +389,30 @@ func (r *BgRegistry) lookup(id string) (*BgProcess, bool) {
 	return p, ok
 }
 
-// GC drops finished processes idle longer than r.idleGC. Caller is
-// expected to invoke periodically (e.g. ticker every 5 minutes).
+// BgGCInterval is how often GCLoop sweeps the registry.
+const BgGCInterval = 5 * time.Minute
+
+// GCLoop calls GC every interval (default BgGCInterval when <= 0) until
+// ctx cancels. Runs on the calling goroutine; start it with
+// go reg.GCLoop(ctx). Finished processes linger for r.idleGC and are
+// then dropped along with their output buffers.
+func (r *BgRegistry) GCLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = BgGCInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.GC()
+		}
+	}
+}
+
+// GC drops finished processes idle longer than r.idleGC.
 func (r *BgRegistry) GC() (removed []string) {
 	now := time.Now()
 	r.mu.Lock()
