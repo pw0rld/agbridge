@@ -46,8 +46,15 @@ type BridgeState struct {
 	E2EMode             string               `json:"e2e_mode"`
 	DefaultTarget       string               `json:"default_target"`
 	KnownDaemons        map[string]DaemonRef `json:"known_daemons"`
-	WorkingDir          string               `json:"working_dir,omitempty"`
-	EnrolledAt          time.Time            `json:"enrolled_at"`
+	// WorkingDirs maps a target name (a KnownDaemons key) to the CLI-side
+	// working directory for that daemon. Per-target on purpose: `cd` on
+	// one machine must never change relative-path resolution on another.
+	WorkingDirs map[string]string `json:"working_dirs,omitempty"`
+	// WorkingDir is the pre-v0.0.5 global field, kept only to migrate old
+	// state files. LoadBridge folds it into WorkingDirs[default_target]
+	// and clears it; new code must not read or write it.
+	WorkingDir string    `json:"working_dir,omitempty"`
+	EnrolledAt time.Time `json:"enrolled_at"`
 }
 
 // DaemonState lives on the daemon host.

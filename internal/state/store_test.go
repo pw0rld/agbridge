@@ -62,6 +62,50 @@ func TestLoadMissingFileReturnsError(t *testing.T) {
 	}
 }
 
+// TestLoadBridgeMigratesLegacyWorkingDir verifies the deprecated global
+// working_dir field is folded into WorkingDirs[default_target] at load
+// time and cleared, without clobbering an existing per-target entry.
+func TestLoadBridgeMigratesLegacyWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	raw := map[string]any{
+		"version":        1,
+		"device_id":      "d_x",
+		"agent_name":     "x",
+		"api_key":        "k",
+		"default_target": "lab",
+		"working_dir":    "/legacy/path",
+	}
+	b, _ := json.Marshal(raw)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadBridge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.WorkingDir != "" {
+		t.Fatalf("legacy field not cleared: %q", st.WorkingDir)
+	}
+	if st.WorkingDirs["lab"] != "/legacy/path" {
+		t.Fatalf("not migrated: %v", st.WorkingDirs)
+	}
+
+	// Existing per-target value wins over the legacy field.
+	raw["working_dirs"] = map[string]string{"lab": "/already/set"}
+	b, _ = json.Marshal(raw)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err = LoadBridge(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.WorkingDirs["lab"] != "/already/set" {
+		t.Fatalf("migration clobbered existing entry: %v", st.WorkingDirs)
+	}
+}
+
 func TestSaveLoadDaemonRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

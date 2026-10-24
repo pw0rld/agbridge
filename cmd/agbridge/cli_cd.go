@@ -79,7 +79,7 @@ func runCd(cmd *cobra.Command, arg string, opts cliclient.Options) error {
 		printErrorJSON(cmd.ErrOrStderr(), "not_a_directory", err.Error(), false)
 		return err
 	}
-	if err := setWorkingDir(target); err != nil {
+	if err := setWorkingDir(opts.Target, target); err != nil {
 		printErrorJSON(cmd.ErrOrStderr(), "state_unwritable", err.Error(), false)
 		return err
 	}

@@ -25,18 +25,19 @@ func resolveRemotePath(cwd, arg string) string {
 	return path.Clean(path.Join(cwd, arg))
 }
 
-// ensureWorkingDir returns the CLI's working directory, bootstrapping it
-// from the daemon's advertised default_working_dir on first use and
-// persisting it to state.json. A non-empty stored value never triggers a
-// network call.
+// ensureWorkingDir returns the CLI's working directory for opts.Target
+// only, bootstrapping it from that daemon's advertised
+// default_working_dir on first use and persisting it per-target in
+// state.json. A non-empty stored value never triggers a network call,
+// and no target ever inherits another target's directory.
 func ensureWorkingDir(ctx context.Context, opts cliclient.Options) (string, error) {
 	p := stateJSONPath(g.stateDir)
 	st, err := state.LoadBridge(p)
 	if err != nil {
 		return "", err
 	}
-	if st.WorkingDir != "" {
-		return st.WorkingDir, nil
+	if cwd := st.WorkingDirs[opts.Target]; cwd != "" {
+		return cwd, nil
 	}
 	dwd, err := fetchDefaultWorkingDir(ctx, opts)
 	if err != nil {
@@ -45,7 +46,10 @@ func ensureWorkingDir(ctx context.Context, opts cliclient.Options) (string, erro
 	if dwd == "" {
 		dwd = "/"
 	}
-	st.WorkingDir = dwd
+	if st.WorkingDirs == nil {
+		st.WorkingDirs = map[string]string{}
+	}
+	st.WorkingDirs[opts.Target] = dwd
 	if err := state.SaveBridge(p, st); err != nil {
 		return "", err
 	}
@@ -67,14 +71,18 @@ func resolveArg(ctx context.Context, opts cliclient.Options, arg string) (string
 	return resolveRemotePath(cwd, arg), nil
 }
 
-// setWorkingDir persists an explicit working directory (used by `cd`).
-func setWorkingDir(dir string) error {
+// setWorkingDir persists an explicit working directory for one target
+// (used by `cd`). Other targets are untouched.
+func setWorkingDir(target, dir string) error {
 	p := stateJSONPath(g.stateDir)
 	st, err := state.LoadBridge(p)
 	if err != nil {
 		return err
 	}
-	st.WorkingDir = dir
+	if st.WorkingDirs == nil {
+		st.WorkingDirs = map[string]string{}
+	}
+	st.WorkingDirs[target] = dir
 	return state.SaveBridge(p, st)
 }
 

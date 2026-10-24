@@ -26,7 +26,28 @@ func LoadBridge(path string) (*BridgeState, error) {
 	if s.Version != CurrentVersion {
 		return nil, fmt.Errorf("state: bridge schema version %d, expected %d (re-enroll required)", s.Version, CurrentVersion)
 	}
+	s.migrateWorkingDirs()
 	return &s, nil
+}
+
+// migrateWorkingDirs folds the deprecated global working_dir into
+// WorkingDirs[default_target] once at load time. The old field applied to
+// every target, which corrupted multi-daemon setups; after migration the
+// value only shadows the target it was most likely set for, and every
+// other target bootstraps from its own daemon's default_working_dir.
+func (s *BridgeState) migrateWorkingDirs() {
+	if s.WorkingDir == "" {
+		return
+	}
+	if s.DefaultTarget != "" {
+		if s.WorkingDirs == nil {
+			s.WorkingDirs = map[string]string{}
+		}
+		if _, exists := s.WorkingDirs[s.DefaultTarget]; !exists {
+			s.WorkingDirs[s.DefaultTarget] = s.WorkingDir
+		}
+	}
+	s.WorkingDir = ""
 }
 
 // LoadDaemon reads + version-checks a daemon state file.
