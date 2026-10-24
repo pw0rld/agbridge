@@ -20,7 +20,8 @@ const DefaultTimeout = 5 * time.Second
 // Locker is a held exclusive lock. The zero value is not usable;
 // obtain one from Acquire.
 type Locker struct {
-	f *os.File
+	f    *os.File
+	path string
 }
 
 // Acquire takes an exclusive cross-process lock guarding dataPath by
@@ -40,13 +41,13 @@ func Acquire(dataPath string, timeout time.Duration) (*Locker, error) {
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		ok, err := tryLock(f)
+		ok, err := tryLock(dataPath, f)
 		if err != nil {
 			_ = f.Close()
 			return nil, fmt.Errorf("filelock: lock: %w", err)
 		}
 		if ok {
-			return &Locker{f: f}, nil
+			return &Locker{f: f, path: dataPath}, nil
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
@@ -61,6 +62,6 @@ func (l *Locker) Release() {
 	if l == nil {
 		return
 	}
-	unlock(l.f)
+	unlock(l.path, l.f)
 	_ = l.f.Close()
 }

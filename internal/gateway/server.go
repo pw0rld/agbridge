@@ -248,8 +248,14 @@ func handleBridge(ctx context.Context, c connIO, h handshake.Hello, inst *Instan
 		if err := sendQ.submit(f); err != nil {
 			cancel()      // stop the sender goroutine
 			_ = c.Close() // wake the bridge→daemon loop; its defers unsubscribe & release
-			inst.Metrics.queueOverflow()
-			_ = aud.Append(map[string]any{"event": "bridge_queue_overflow", "agent": h.Name, "target": h.TargetDaemon})
+			// Only a genuinely full queue is an overflow. submit also
+			// reports context.Canceled and ErrSendQueueClosed while a
+			// session is tearing down, and counting those turned every
+			// ordinary bridge disconnect into an overflow alert.
+			if errors.Is(err, ErrSendQueueFull) {
+				inst.Metrics.queueOverflow()
+				_ = aud.Append(map[string]any{"event": "bridge_queue_overflow", "agent": h.Name, "target": h.TargetDaemon})
+			}
 			return err
 		}
 		return nil

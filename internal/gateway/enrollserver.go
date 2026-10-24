@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"sync"
 
@@ -137,6 +138,15 @@ func (s *EnrollServer) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Token == "" || req.DevicePubkeyB64 == "" {
 		http.Error(w, "token and device_pubkey_b64 required", http.StatusBadRequest)
+		return
+	}
+	// Refuse names the config baseline already credentials: the baseline
+	// always wins over the persisted file, so the enrollment would be
+	// silently reverted by the next unrelated enrollment and the device
+	// would be locked out with no audit trail. Peek (not Consume) first
+	// so a rejected request does not burn the one-shot token.
+	if peek, perr := s.Tokens.Peek(req.Token); perr == nil && s.baselineCredentials(peek.Role, peek.Name) {
+		http.Error(w, fmt.Sprintf("%s %q is credentialed in the gateway config; edit the config instead of enrolling it", peek.Role, peek.Name), http.StatusConflict)
 		return
 	}
 	tok, err := s.Tokens.Consume(req.Token)
@@ -294,7 +304,10 @@ func (s *EnrollServer) mutateState(fn func(st *state.GatewayState) error) error 
 		defer lock.Release()
 	}
 
-	st := s.effectiveStateLocked()
+	st, err := s.effectiveStateLocked()
+	if err != nil {
+		return err
+	}
 	if err := fn(st); err != nil {
 		return err
 	}
@@ -310,25 +323,37 @@ func (s *EnrollServer) mutateState(fn func(st *state.GatewayState) error) error 
 // effectiveStateLocked returns a fresh copy of the config baseline with
 // entries that exist only in the persisted file layered in. The
 // baseline never learns about enrollments, so anything pruned from
-// disk stays gone. With StatePath == "" the in-memory state is the
-// sole source of truth (no file to reload from).
-func (s *EnrollServer) effectiveStateLocked() *state.GatewayState {
-	base := s.base
+// disk stays gone. With StatePath == "" there is no file to reload
+// from, so the in-memory snapshot is the only source of truth —
+// starting from the baseline there would make every enrollment forget
+// the previous one (device #2 evicting device #1).
+//
+// A persisted file we cannot read is an error, never a fallback: saving
+// the baseline over it would silently delete every enrolled device.
+func (s *EnrollServer) effectiveStateLocked() (*state.GatewayState, error) {
+	var base *state.GatewayState
+	if s.StatePath == "" {
+		base = s.state
+	}
 	if base == nil {
-		if s.StatePath == "" {
-			base = s.state
-		}
-		if base == nil {
-			base = &state.GatewayState{Version: state.CurrentVersion}
-		}
+		base = s.base
+	}
+	if base == nil {
+		base = &state.GatewayState{Version: state.CurrentVersion}
 	}
 	out := copyGatewayState(base)
 	if s.StatePath != "" {
-		if prior, err := state.LoadGateway(s.StatePath); err == nil {
+		prior, err := state.LoadGateway(s.StatePath)
+		switch {
+		case err == nil:
 			mergeEnrolled(out, prior)
+		case errors.Is(err, fs.ErrNotExist):
+			// First enrollment against this state file: nothing to merge.
+		default:
+			return nil, fmt.Errorf("enroll: reload %s: %w", s.StatePath, err)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func copyGatewayState(in *state.GatewayState) *state.GatewayState {
@@ -342,27 +367,73 @@ func copyGatewayState(in *state.GatewayState) *state.GatewayState {
 	return &out
 }
 
-// mergeEnrolled layers prior entries that into lacks. Existing names
-// win: config and the enrollment being applied take precedence over
-// stale persisted records.
+// mergeEnrolled layers prior entries that into lacks, and fills in
+// credentials the baseline only declares as placeholders (empty hash).
+//
+// A name that both sides carry a credential for stays owned by the
+// baseline: config is declarative, and letting a persisted record win
+// would make a config edit silently ineffective. HandleEnroll therefore
+// refuses to enroll such a name up front, so the two sources never
+// disagree in the first place.
 func mergeEnrolled(into, prior *state.GatewayState) {
-	have := map[string]bool{}
-	for _, a := range into.Agents {
-		have["a/"+a.Name] = true
-	}
-	for _, d := range into.Daemons {
-		have["d/"+d.Name] = true
+	agents := make(map[string]int, len(into.Agents))
+	for i, a := range into.Agents {
+		agents[a.Name] = i
 	}
 	for _, a := range prior.Agents {
-		if !have["a/"+a.Name] {
+		i, ok := agents[a.Name]
+		if !ok {
 			into.Agents = append(into.Agents, a)
+			agents[a.Name] = len(into.Agents) - 1
+			continue
 		}
+		if into.Agents[i].APIKeyHash == "" && a.APIKeyHash != "" {
+			into.Agents[i] = a
+		}
+	}
+	daemons := make(map[string]int, len(into.Daemons))
+	for i, d := range into.Daemons {
+		daemons[d.Name] = i
 	}
 	for _, d := range prior.Daemons {
-		if !have["d/"+d.Name] {
+		i, ok := daemons[d.Name]
+		if !ok {
 			into.Daemons = append(into.Daemons, d)
+			daemons[d.Name] = len(into.Daemons) - 1
+			continue
+		}
+		if into.Daemons[i].TokenHash == "" && d.TokenHash != "" {
+			into.Daemons[i] = d
 		}
 	}
+}
+
+// baselineCredentials reports whether the config baseline declares
+// role/name with a real credential hash. An empty hash is a placeholder
+// (the operator reserved the name), and enrollment is allowed to fill
+// it in — mergeEnrolled lets the persisted credential win in that case.
+func (s *EnrollServer) baselineCredentials(role, name string) bool {
+	s.mu.Lock()
+	base := s.base
+	s.mu.Unlock()
+	if base == nil {
+		return false
+	}
+	switch role {
+	case "daemon":
+		for _, d := range base.Daemons {
+			if d.Name == name {
+				return d.TokenHash != ""
+			}
+		}
+	case "bridge":
+		for _, a := range base.Agents {
+			if a.Name == name {
+				return a.APIKeyHash != ""
+			}
+		}
+	}
+	return false
 }
 
 func randomBase64(nBytes int) (string, error) {
